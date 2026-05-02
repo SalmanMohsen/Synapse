@@ -6,7 +6,7 @@ from app.auth.dependencies import get_auth_service, get_current_user
 from app.auth.models import User
 from app.auth.schemas import LoginRequest, RegisterRequest, UserRead
 from app.auth.service import AuthService
-from app.core.config import settings # Assuming you moved config to core based on previous steps
+from app.config import settings 
 
 # Specification: All routes prefixed with /api/v1/
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])

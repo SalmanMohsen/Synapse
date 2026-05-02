@@ -1,0 +1,37 @@
+from functools import lru_cache
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    # Database
+    database_url: str = "postgresql+asyncpg://synapse:synapse@postgres:5432/synapse"
+
+    # Redis
+    redis_url: str = "redis://redis:6379"
+
+    # JWT
+    jwt_secret_key: str = "change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    access_token_expire_minutes: int = 15
+    refresh_token_expire_days: int = 7
+
+    # Cookies
+    cookie_secure: bool = False   # set True in production (HTTPS only)
+
+    # CORS / OAuth redirects — must be the exact browser-facing frontend origin
+    frontend_url: str = "http://localhost:5173"
+
+    # GitHub OAuth App credentials
+    github_client_id: str = ""
+    github_client_secret: str = ""
+
+    # Google OAuth credentials
+    google_client_id: str = ""
+    google_client_secret: str = ""
+
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()
