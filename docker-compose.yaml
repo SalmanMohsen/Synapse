@@ -10,7 +10,7 @@ services:
       - "5173:5173"
     volumes:
       - ./frontend:/frontend 
-      - /app/node_modules
+      - /a/node_modules
     environment:
       - ENV=development
 
