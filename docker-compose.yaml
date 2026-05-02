@@ -24,7 +24,10 @@ services:
       - ENV=development
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://redis:6379/0
-      - SECRET_KEY=${SECRET_KEY}
+      - JWT_SECRET_KEY=${SECRET_KEY}
+      - FRONTEND_URL=http://localhost:5173    
+      - BACKEND_URL=http://localhost:8000     
+      - COOKIE_SECURE=false  
       - GITHUB_CLIENT_ID=${GITHUB_CLIENT_ID}
       - GITHUB_CLIENT_SECRET=${GITHUB_CLIENT_SECRET}
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
