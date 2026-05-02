@@ -140,7 +140,7 @@ class AuthService:
                     "client_secret": settings.google_client_secret,
                     "code": code,
                     "grant_type": "authorization_code",
-                    "redirect_uri": f"{settings.backend_url}/auth/google/callback",
+                    "redirect_uri": f"{settings.backend_url}/api/v1/auth/google/callback",
                 },
                 timeout=10,
             )

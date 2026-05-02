@@ -9,8 +9,8 @@ services:
     ports:
       - "5173:5173"
     volumes:
-      - ./frontend:/frontend 
-      - /a/node_modules
+      - ./frontend:/app 
+      - /app/node_modules
     environment:
       - ENV=development
 
