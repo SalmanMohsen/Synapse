@@ -23,4 +23,4 @@ EXPOSE 8000
 # Command to run the application with hot reload enabled
 COPY entrypoint.sh .
 RUN chmod +x entrypoint.sh
-CMD ["./entrypoint.sh"]
+CMD ["sh", "entrypoint.sh"]
