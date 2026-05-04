@@ -1,0 +1,165 @@
+.root {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  min-height: 100vh;
+}
+
+/* ── Left panel ─────────────────────────────────────────────────────── */
+.panel {
+  position: relative;
+  background: var(--bg-surface);
+  border-right: 1px solid var(--border-subtle);
+  overflow: hidden;
+}
+
+.panelInner {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 48px;
+  gap: 0;
+}
+
+.grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--border-subtle) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border-subtle) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(ellipse 80% 80% at 50% 50%, black 40%, transparent 100%);
+}
+
+.orb {
+  position: absolute;
+  top: -120px;
+  left: -80px;
+  width: 480px;
+  height: 480px;
+  background: radial-gradient(circle, rgba(99,102,241,0.12) 0%, transparent 70%);
+  pointer-events: none;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  animation: fadeUp 0.5s var(--ease) both;
+}
+
+.brandName {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.01em;
+}
+
+.tagline {
+  margin-top: auto;
+  animation: fadeUp 0.5s var(--ease) 0.1s both;
+}
+
+.headline {
+  font-family: var(--font-sans);
+  font-size: 32px;
+  font-weight: 300;
+  line-height: 1.3;
+  color: var(--text-primary);
+  letter-spacing: -0.03em;
+}
+
+.headlineAccent {
+  color: var(--brand-hover);
+  font-weight: 400;
+}
+
+.sub {
+  margin-top: 16px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--text-tertiary);
+  font-weight: 300;
+  max-width: 340px;
+}
+
+.pillRow {
+  display: flex;
+  gap: 8px;
+  margin-top: 32px;
+  flex-wrap: wrap;
+  animation: fadeUp 0.5s var(--ease) 0.2s both;
+}
+
+.pill {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--brand-hover);
+  background: var(--brand-muted);
+  border: 1px solid rgba(99,102,241,0.2);
+  border-radius: 99px;
+  padding: 4px 10px;
+  letter-spacing: 0.02em;
+}
+
+.flowPreview {
+  margin-top: 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-bottom: 8px;
+  animation: fadeUp 0.5s var(--ease) 0.3s both;
+}
+
+.flowStep {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 12px;
+  border-radius: var(--radius-md);
+  opacity: 0;
+  animation: fadeUp 0.4s var(--ease) both;
+  animation-fill-mode: forwards;
+}
+
+.flowStep:hover {
+  background: var(--bg-elevated);
+}
+
+.flowIndex {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--brand);
+  opacity: 0.6;
+  min-width: 20px;
+}
+
+.flowText {
+  font-size: 13px;
+  color: var(--text-secondary);
+  font-weight: 300;
+}
+
+/* ── Right panel — form ─────────────────────────────────────────────── */
+.form {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-base);
+  padding: 48px 32px;
+}
+
+.formInner {
+  width: 100%;
+  max-width: 380px;
+  animation: fadeUp 0.55s var(--ease) 0.05s both;
+}
+
+/* ── Responsive ─────────────────────────────────────────────────────── */
+@media (max-width: 900px) {
+  .root { grid-template-columns: 1fr; }
+  .panel { display: none; }
+  .form { padding: 32px 24px; align-items: flex-start; padding-top: 60px; }
+}
