@@ -1,0 +1,99 @@
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.label {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  user-select: none;
+}
+
+.inputWrap {
+  position: relative;
+}
+
+.input {
+  width: 100%;
+  height: 42px;
+  padding: 0 14px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-md);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 400;
+  transition:
+    border-color 0.15s var(--ease-fast),
+    background 0.15s var(--ease-fast),
+    box-shadow 0.15s var(--ease-fast);
+  outline: none;
+  caret-color: var(--brand);
+  -webkit-appearance: none;
+}
+
+.input::placeholder {
+  color: var(--text-disabled);
+  font-weight: 300;
+}
+
+.input:hover:not(:focus):not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--bg-overlay);
+}
+
+.input:focus {
+  border-color: var(--border-focus);
+  background: var(--bg-overlay);
+  box-shadow: 0 0 0 3px var(--brand-glow);
+}
+
+.input:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.inputError {
+  border-color: var(--error-border) !important;
+}
+
+.inputError:focus {
+  box-shadow: 0 0 0 3px rgba(248,113,113,0.15) !important;
+}
+
+/* Animated bottom highlight on focus */
+.highlight {
+  position: absolute;
+  bottom: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 0;
+  height: 1px;
+  background: var(--brand);
+  border-radius: 99px;
+  transition: width 0.25s var(--ease);
+  pointer-events: none;
+}
+
+.inputWrap:has(.input:focus) .highlight {
+  width: calc(100% - 16px);
+}
+
+.error {
+  font-size: 12px;
+  color: var(--error);
+  font-weight: 400;
+  line-height: 1.4;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--text-tertiary);
+  line-height: 1.4;
+}
