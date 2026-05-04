@@ -1,4 +1,4 @@
-version: '3.8'
+
 
 services:
   frontend:
@@ -43,7 +43,7 @@ services:
       - synapse-network
 
   postgres:
-    image: postgres:15-alpine
+    image: postgres:17-alpine
     container_name: synapse-postgres
     restart: always
     environment:
