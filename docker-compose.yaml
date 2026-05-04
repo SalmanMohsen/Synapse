@@ -13,6 +13,8 @@ services:
       - /app/node_modules
     environment:
       - ENV=development
+    networks:
+      - synapse-network
 
   backend:
     build: ./backend
@@ -37,6 +39,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - synapse-network
 
   postgres:
     image: postgres:15-alpine
@@ -56,6 +60,8 @@ services:
       interval: 5s
       timeout: 5s
       retries: 5
+    networks:
+      - synapse-network
 
   redis:
     image: redis:7-alpine
@@ -70,7 +76,13 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - synapse-network
 
 volumes:
   postgres_data:
   redis_data:
+
+networks:
+  synapse-network:
+    driver: bridge
