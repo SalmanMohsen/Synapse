@@ -1,0 +1,84 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--brand);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.title {
+  font-family: var(--font-sans);
+  font-size: 22px;
+  font-weight: 500;
+  color: var(--text-primary);
+  letter-spacing: -0.03em;
+  line-height: 1.2;
+}
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+/* ── Server error banner ─────────────────────────────────────────── */
+.serverError {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--error-bg);
+  border: 1px solid var(--error-border);
+  border-radius: var(--radius-md);
+  color: var(--error);
+  font-size: 13px;
+  line-height: 1.4;
+  animation: fadeUp 0.2s var(--ease) both;
+}
+
+/* ── Bottom links ────────────────────────────────────────────────── */
+.switch {
+  text-align: center;
+  font-size: 13.5px;
+  color: var(--text-tertiary);
+}
+
+.link {
+  color: var(--brand-hover);
+  text-decoration: none;
+  font-weight: 500;
+  transition: color 0.1s;
+}
+
+.link:hover {
+  color: var(--text-primary);
+}
+
+.terms {
+  text-align: center;
+  font-size: 11.5px;
+  color: var(--text-tertiary);
+  line-height: 1.6;
+}
+
+.termsLink {
+  color: var(--text-secondary);
+  text-decoration: none;
+  transition: color 0.1s;
+}
+
+.termsLink:hover {
+  color: var(--text-primary);
+}
