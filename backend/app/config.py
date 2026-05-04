@@ -4,13 +4,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     # Database
-    database_url: str = "postgresql+asyncpg://synapse:synapse@postgres:5432/synapse"
-
+    database_url: str = "postgresql+asyncpg://synapse:synapse@postgres:5432/synapse"    
     # Redis
     redis_url: str = "redis://redis:6379"
 
     # JWT
-    jwt_secret_key: str = "change-me-in-production"
+    jwt_secret_key: str = ""
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 15
     refresh_token_expire_days: int = 7
