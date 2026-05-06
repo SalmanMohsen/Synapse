@@ -65,7 +65,6 @@ export const useLogout = () => {
   return useMutation({
     mutationFn: authApi.logout,
     onSettled: () => {
-      // Clear regardless of whether the server call succeeded
       setUser(null)
       queryClient.clear()
       navigate('/login')
@@ -73,7 +72,7 @@ export const useLogout = () => {
   })
 }
 
-// ── OAuth popup ──────────────────────────────────────────────────────────────
+// ── OAuth popup — sign in / register ─────────────────────────────────────────
 //
 // Opens a popup to the backend OAuth start URL. The backend redirects to
 // GitHub/Google, handles the callback, sets the httpOnly cookies, and serves
@@ -94,21 +93,17 @@ export const useOAuthPopup = () => {
     )
 
     if (!popup) {
-      // Popup was blocked — fall back to full redirect
       window.location.href = authApi.oauthUrl(provider)
       return
     }
 
     const handleMessage = async (event: MessageEvent) => {
-      // Strict origin check — only accept messages from the backend
       if (event.origin !== import.meta.env.VITE_API_URL) return
 
       window.removeEventListener('message', handleMessage)
       clearInterval(closedPoller)
 
       if (event.data?.type === 'oauth_success') {
-        // Cookie is already set by the backend popup response.
-        // Just fetch the user to hydrate state.
         const user = await authApi.getMe()
         setUser(user)
         queryClient.setQueryData(['me'], user)
@@ -117,13 +112,12 @@ export const useOAuthPopup = () => {
 
       if (event.data?.type === 'oauth_error') {
         console.error('OAuth error:', event.data.reason)
-        // TODO: surface this as a toast notification
+        // TODO: surface as toast
       }
     }
 
     window.addEventListener('message', handleMessage)
 
-    // Clean up listener if the user closes the popup manually without completing
     const closedPoller = setInterval(() => {
       if (popup.closed) {
         clearInterval(closedPoller)
@@ -133,4 +127,78 @@ export const useOAuthPopup = () => {
   }
 
   return { open }
+}
+
+// ── OAuth popup — account linking ─────────────────────────────────────────────
+//
+// Same popup pattern as sign-in but points to /auth/link/:provider.
+// The backend posts 'link_success' or 'link_error' instead of 'oauth_success'.
+// On success we re-fetch /me so the store reflects the newly linked provider.
+
+export const useLinkProvider = () => {
+  const setUser = useAuthStore((s) => s.setUser)
+  const queryClient = useQueryClient()
+
+  const link = (provider: OAuthProvider): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      const popup = window.open(
+        authApi.linkUrl(provider),
+        'synapse-link',
+        'width=600,height=700,scrollbars=yes,resizable=yes',
+      )
+
+      if (!popup) {
+        reject(new Error('Popup was blocked. Please allow popups for this site.'))
+        return
+      }
+
+      const handleMessage = async (event: MessageEvent) => {
+        if (event.origin !== import.meta.env.VITE_API_URL) return
+
+        window.removeEventListener('message', handleMessage)
+        clearInterval(closedPoller)
+
+        if (event.data?.type === 'link_success') {
+          // Re-fetch to get updated github_user_id / google_user_id on user
+          const user = await authApi.getMe()
+          setUser(user)
+          queryClient.setQueryData(['me'], user)
+          resolve()
+        }
+
+        if (event.data?.type === 'link_error') {
+          reject(new Error(event.data.reason ?? 'Linking failed'))
+        }
+      }
+
+      window.addEventListener('message', handleMessage)
+
+      const closedPoller = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(closedPoller)
+          window.removeEventListener('message', handleMessage)
+          // User closed popup without completing — resolve silently
+          resolve()
+        }
+      }, 500)
+    })
+  }
+
+  return { link }
+}
+
+// ── Unlink provider ───────────────────────────────────────────────────────────
+
+export const useUnlinkProvider = () => {
+  const setUser = useAuthStore((s) => s.setUser)
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: (provider: OAuthProvider) =>
+      provider === 'github' ? authApi.unlinkGithub() : authApi.unlinkGoogle(),
+    onSuccess: (user) => {
+      setUser(user)
+      queryClient.setQueryData(['me'], user)
+    },
+  })
 }

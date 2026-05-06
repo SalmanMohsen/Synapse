@@ -23,7 +23,7 @@ class AuthService:
         self.redis = redis
 
     # ------------------------------------------------------------------ #
-    # Email / password                                                   #
+    # Email / password                                                     #
     # ------------------------------------------------------------------ #
 
     async def register(self, data: RegisterRequest) -> tuple[UserRead, str, str]:
@@ -36,7 +36,6 @@ class AuthService:
                 display_name=data.display_name,
                 hashed_password=hash_password(data.password),
             )
-            # UoW handles the transaction commit
             await self.uow.commit()
 
             access_token, _ = create_access_token(user.id)
@@ -56,12 +55,12 @@ class AuthService:
             return UserRead.model_validate(user), access_token, refresh_token
 
     # ------------------------------------------------------------------ #
-    # GitHub OAuth                                                       #
+    # GitHub OAuth — sign in / register                                   #
     # ------------------------------------------------------------------ #
 
-    async def github_callback(self, code: str) -> tuple[UserRead, str, str]:
+    async def _fetch_github_user(self, code: str) -> tuple[dict, str]:
+        """Exchange code for GitHub user profile + verified email. Returns (gh_user, email)."""
         async with httpx.AsyncClient() as client:
-            # Exchange code for GitHub access token
             token_resp = await client.post(
                 "https://github.com/login/oauth/access_token",
                 json={
@@ -76,7 +75,6 @@ class AuthService:
             if not gh_token:
                 raise HTTPException(status_code=400, detail="GitHub OAuth failed — no access token")
 
-            # Fetch GitHub user profile
             user_resp = await client.get(
                 "https://api.github.com/user",
                 headers={"Authorization": f"Bearer {gh_token}", "Accept": "application/json"},
@@ -84,7 +82,6 @@ class AuthService:
             )
             gh_user = user_resp.json()
 
-            # Fetch primary verified email if not public on profile
             email: str | None = gh_user.get("email")
             if not email:
                 emails_resp = await client.get(
@@ -101,36 +98,93 @@ class AuthService:
         if not email:
             raise HTTPException(status_code=400, detail="No verified email on GitHub account")
 
+        return gh_user, email
+
+    async def github_callback(self, code: str) -> tuple[UserRead, str, str]:
+        gh_user, email = await self._fetch_github_user(code)
+
         async with self.uow:
-            # Upsert: find by github_id → find by email → create
             user = await self.uow.users.get_by_github_id(str(gh_user["id"]))
             if not user:
-                # Check if email is already taken by ANY other method
                 existing = await self.uow.users.get_by_email(email)
                 if existing:
+                    # Tell the user which method they registered with
+                    method = "Google" if existing.google_user_id else "email and password"
                     raise HTTPException(
                         status_code=409,
-                        detail="This email is registered with a different sign-in method."
-                )
+                        detail=f"This email is already registered via {method}. "
+                               f"Sign in with {method}, then link GitHub from account settings.",
+                    )
                 user = await self.uow.users.create(
                     email=email,
                     display_name=gh_user.get("name") or gh_user.get("login") or email,
                     github_user_id=str(gh_user["id"]),
                     avatar_url=gh_user.get("avatar_url"),
                 )
-            
-            # Persist the OAuth user updates/creation
+
             await self.uow.commit()
 
             access_token, _ = create_access_token(user.id)
             refresh_token, _ = create_refresh_token(user.id)
             return UserRead.model_validate(user), access_token, refresh_token
 
+    async def link_github(self, current_user_id: str, code: str) -> UserRead:
+        """Attach a GitHub identity to an already-authenticated account."""
+        gh_user, _ = await self._fetch_github_user(code)
+
+        async with self.uow:
+            # Make sure this GitHub account isn't already linked to someone else
+            existing = await self.uow.users.get_by_github_id(str(gh_user["id"]))
+            if existing and existing.id != current_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This GitHub account is already linked to another Synapse account.",
+                )
+
+            user = await self.uow.users.get_by_id(current_user_id)
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            if user.github_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A GitHub account is already linked. Unlink it first.",
+                )
+
+            user = await self.uow.users.update(
+                user,
+                github_user_id=str(gh_user["id"]),
+                # Only update avatar if the user doesn't have one yet
+                avatar_url=user.avatar_url or gh_user.get("avatar_url"),
+            )
+            await self.uow.commit()
+            return UserRead.model_validate(user)
+
+    async def unlink_github(self, current_user_id: str) -> UserRead:
+        """Remove the GitHub identity from an account."""
+        async with self.uow:
+            user = await self.uow.users.get_by_id(current_user_id)
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            # Must have another sign-in method before unlinking
+            if not user.google_user_id and not user.hashed_password:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot unlink GitHub — it is your only sign-in method. "
+                           "Add a password or link Google first.",
+                )
+
+            user = await self.uow.users.update(user, github_user_id=None)
+            await self.uow.commit()
+            return UserRead.model_validate(user)
+
     # ------------------------------------------------------------------ #
-    # Google OAuth                                                       #
+    # Google OAuth — sign in / register                                   #
     # ------------------------------------------------------------------ #
 
-    async def google_callback(self, code: str) -> tuple[UserRead, str, str]:
+    async def _fetch_google_user(self, code: str) -> tuple[dict, str]:
+        """Exchange code for Google user profile. Returns (g_user, email)."""
         async with httpx.AsyncClient() as client:
             token_resp = await client.post(
                 "https://oauth2.googleapis.com/token",
@@ -158,15 +212,21 @@ class AuthService:
         if not email:
             raise HTTPException(status_code=400, detail="No email from Google account")
 
+        return g_user, email
+
+    async def google_callback(self, code: str) -> tuple[UserRead, str, str]:
+        g_user, email = await self._fetch_google_user(code)
+
         async with self.uow:
             user = await self.uow.users.get_by_google_id(g_user["id"])
             if not user:
-                # Check if email is already taken by ANY other method
                 existing = await self.uow.users.get_by_email(email)
                 if existing:
+                    method = "GitHub" if existing.github_user_id else "email and password"
                     raise HTTPException(
                         status_code=409,
-                        detail="This email is registered with a different sign-in method."
+                        detail=f"This email is already registered via {method}. "
+                               f"Sign in with {method}, then link Google from account settings.",
                     )
                 user = await self.uow.users.create(
                     email=email,
@@ -174,16 +234,63 @@ class AuthService:
                     google_user_id=g_user["id"],
                     avatar_url=g_user.get("picture"),
                 )
-            
-            # Persist the OAuth user updates/creation
+
             await self.uow.commit()
 
             access_token, _ = create_access_token(user.id)
             refresh_token, _ = create_refresh_token(user.id)
             return UserRead.model_validate(user), access_token, refresh_token
 
+    async def link_google(self, current_user_id: str, code: str) -> UserRead:
+        """Attach a Google identity to an already-authenticated account."""
+        g_user, _ = await self._fetch_google_user(code)
+
+        async with self.uow:
+            existing = await self.uow.users.get_by_google_id(g_user["id"])
+            if existing and existing.id != current_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="This Google account is already linked to another Synapse account.",
+                )
+
+            user = await self.uow.users.get_by_id(current_user_id)
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            if user.google_user_id:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A Google account is already linked. Unlink it first.",
+                )
+
+            user = await self.uow.users.update(
+                user,
+                google_user_id=g_user["id"],
+                avatar_url=user.avatar_url or g_user.get("picture"),
+            )
+            await self.uow.commit()
+            return UserRead.model_validate(user)
+
+    async def unlink_google(self, current_user_id: str) -> UserRead:
+        """Remove the Google identity from an account."""
+        async with self.uow:
+            user = await self.uow.users.get_by_id(current_user_id)
+            if not user:
+                raise HTTPException(status_code=404, detail="User not found")
+
+            if not user.github_user_id and not user.hashed_password:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot unlink Google — it is your only sign-in method. "
+                           "Add a password or link GitHub first.",
+                )
+
+            user = await self.uow.users.update(user, google_user_id=None)
+            await self.uow.commit()
+            return UserRead.model_validate(user)
+
     # ------------------------------------------------------------------ #
-    # Token refresh (rotation — old refresh token is immediately revoked) #
+    # Token refresh                                                        #
     # ------------------------------------------------------------------ #
 
     async def refresh(self, refresh_token: str) -> tuple[str, str]:
@@ -198,7 +305,6 @@ class AuthService:
         if await self.redis.get(f"revoked:{payload.jti}"):
             raise HTTPException(status_code=401, detail="Refresh token already revoked")
 
-        # Revoke old refresh token before issuing new pair
         await self.redis.setex(
             f"revoked:{payload.jti}",
             int(timedelta(days=settings.refresh_token_expire_days).total_seconds()),
@@ -215,7 +321,7 @@ class AuthService:
             return new_access, new_refresh
 
     # ------------------------------------------------------------------ #
-    # Logout — revoke both tokens                                        #
+    # Logout                                                               #
     # ------------------------------------------------------------------ #
 
     async def logout(self, access_token: str | None, refresh_token: str | None) -> None:
@@ -229,10 +335,10 @@ class AuthService:
                 payload = decode_token(token)
                 await self.redis.setex(f"revoked:{payload.jti}", ttl, "1")
             except ValueError:
-                pass  # already invalid — nothing to revoke
+                pass
 
     # ------------------------------------------------------------------ #
-    # Verify access token (used by the get_current_user dependency)      #
+    # Verify access token                                                  #
     # ------------------------------------------------------------------ #
 
     async def get_user_from_access_token(self, token: str):

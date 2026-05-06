@@ -14,8 +14,18 @@ export const authApi = {
   getMe: (): Promise<User> =>
     api.get<User>('/auth/me').then((r) => r.data),
 
-  // OAuth — browser navigates to the backend directly so cookies are set
-  // on the backend origin, not proxied through Vite.
+  unlinkGithub: (): Promise<User> =>
+    api.delete<User>('/auth/link/github').then((r) => r.data),
+
+  unlinkGoogle: (): Promise<User> =>
+    api.delete<User>('/auth/link/google').then((r) => r.data),
+
+  // OAuth sign-in — browser navigates to the backend directly so cookies are
+  // set on the backend origin, not proxied through Vite.
   oauthUrl: (provider: 'github' | 'google'): string =>
     `${import.meta.env.VITE_API_URL}/api/v1/auth/${provider}`,
+
+  // Linking — same popup pattern but different backend route
+  linkUrl: (provider: 'github' | 'google'): string =>
+    `${import.meta.env.VITE_API_URL}/api/v1/auth/link/${provider}`,
 }
