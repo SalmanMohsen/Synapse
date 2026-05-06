@@ -8,6 +8,7 @@ import RegisterPage from '@/features/auth/pages/RegisterPage'
 import LandingPage from '@/features/auth/pages/LandingPage'
 import ProtectedRoute from '@/router/ProtectedRoute'
 import GuestRoute from '@/router/GuestRoute'
+import SettingsPage from '@/features/auth/pages/SettingsPage'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -37,6 +38,7 @@ export default function App() {
           <Route path="/login"    element={<GuestRoute><LoginPage /></GuestRoute>} />
           <Route path="/register" element={<GuestRoute><RegisterPage /></GuestRoute>} />
           <Route path="/" element={<ProtectedRoute><LandingPage /></ProtectedRoute>} />
+          <Route path="/settings" element={<ProtectedRoute><SettingsPage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

@@ -40,6 +40,9 @@ export default function LandingPage() {
                 >
                   Sign out
                 </button>
+                <button className={styles.btnGhost} onClick={() => navigate('/settings')}>
+                    Settings
+                </button>
               </>
             ) : (
               <>
