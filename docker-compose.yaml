@@ -79,6 +79,19 @@ services:
     networks:
       - synapse-network
 
+  pgadmin:
+    image: dpage/pgadmin4
+    container_name: synapse-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_DEFAULT_EMAIL}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_DEFAULT_PASSWORD}
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - synapse-network
+
 volumes:
   postgres_data:
   redis_data:

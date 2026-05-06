@@ -105,20 +105,19 @@ class AuthService:
             # Upsert: find by github_id → find by email → create
             user = await self.uow.users.get_by_github_id(str(gh_user["id"]))
             if not user:
-                user = await self.uow.users.get_by_email(email)
-                if user:
-                    user = await self.uow.users.update(
-                        user,
-                        github_user_id=str(gh_user["id"]),
-                        avatar_url=gh_user.get("avatar_url"),
-                    )
-                else:
-                    user = await self.uow.users.create(
-                        email=email,
-                        display_name=gh_user.get("name") or gh_user.get("login") or email,
-                        github_user_id=str(gh_user["id"]),
-                        avatar_url=gh_user.get("avatar_url"),
-                    )
+                # Check if email is already taken by ANY other method
+                existing = await self.uow.users.get_by_email(email)
+                if existing:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This email is registered with a different sign-in method."
+                )
+                user = await self.uow.users.create(
+                    email=email,
+                    display_name=gh_user.get("name") or gh_user.get("login") or email,
+                    github_user_id=str(gh_user["id"]),
+                    avatar_url=gh_user.get("avatar_url"),
+                )
             
             # Persist the OAuth user updates/creation
             await self.uow.commit()
@@ -162,20 +161,19 @@ class AuthService:
         async with self.uow:
             user = await self.uow.users.get_by_google_id(g_user["id"])
             if not user:
-                user = await self.uow.users.get_by_email(email)
-                if user:
-                    user = await self.uow.users.update(
-                        user,
-                        google_user_id=g_user["id"],
-                        avatar_url=g_user.get("picture"),
+                # Check if email is already taken by ANY other method
+                existing = await self.uow.users.get_by_email(email)
+                if existing:
+                    raise HTTPException(
+                        status_code=409,
+                        detail="This email is registered with a different sign-in method."
                     )
-                else:
-                    user = await self.uow.users.create(
-                        email=email,
-                        display_name=g_user.get("name") or email,
-                        google_user_id=g_user["id"],
-                        avatar_url=g_user.get("picture"),
-                    )
+                user = await self.uow.users.create(
+                    email=email,
+                    display_name=g_user.get("name") or email,
+                    google_user_id=g_user["id"],
+                    avatar_url=g_user.get("picture"),
+                )
             
             # Persist the OAuth user updates/creation
             await self.uow.commit()
