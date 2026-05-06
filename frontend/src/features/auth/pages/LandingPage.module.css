@@ -1,0 +1,243 @@
+.page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-base);
+}
+
+/* ── Navbar ── */
+.navbar {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  border-bottom: 1px solid var(--border-subtle);
+  background: rgba(8, 8, 9, 0.80);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.navInner {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 24px;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logo {
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  color: var(--text-primary);
+}
+
+.navRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.userInfo {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 12px 4px 4px;
+  border-radius: 999px;
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-surface);
+}
+
+.avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.avatarFallback {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--brand-muted);
+  color: var(--brand-hover);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.displayName {
+  font-size: 13px;
+  color: var(--text-primary);
+  font-weight: 400;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Buttons ── */
+.btnPrimary {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: var(--radius-md);
+  border: none;
+  background: var(--brand);
+  color: #fff;
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s var(--ease-fast), opacity 0.15s;
+}
+
+.btnPrimary:hover {
+  background: var(--brand-hover);
+}
+
+.btnPrimary:active {
+  opacity: 0.85;
+}
+
+.btnPrimary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btnGhost {
+  height: 36px;
+  padding: 0 16px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  font-weight: 400;
+  cursor: pointer;
+  transition: border-color 0.15s var(--ease-fast), color 0.15s;
+}
+
+.btnGhost:hover {
+  border-color: var(--border-strong);
+  color: var(--text-primary);
+}
+
+.btnGhost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Hero ── */
+.hero {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding: 100px 24px 80px;
+}
+
+.heroInner {
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+  animation: fadeUp 0.5s var(--ease) both;
+}
+
+.badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--brand);
+  border: 1px solid var(--brand-muted);
+  background: var(--brand-muted);
+  border-radius: var(--radius-sm);
+  padding: 4px 10px;
+  margin-bottom: 28px;
+}
+
+.headline {
+  font-family: var(--font-sans);
+  font-size: clamp(36px, 6vw, 64px);
+  font-weight: 300;
+  line-height: 1.15;
+  letter-spacing: -0.03em;
+  color: var(--text-primary);
+  margin-bottom: 24px;
+}
+
+.subheadline {
+  font-size: 16px;
+  line-height: 1.7;
+  color: var(--text-secondary);
+  max-width: 520px;
+  margin-bottom: 40px;
+}
+
+.heroCta {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+}
+
+.heroCta .btnPrimary {
+  height: 42px;
+  padding: 0 22px;
+  font-size: 14px;
+}
+
+.heroCta .btnGhost {
+  height: 42px;
+  padding: 0 22px;
+  font-size: 14px;
+}
+
+/* ── Feature grid ── */
+.features {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 24px 100px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.featureCard {
+  padding: 32px 28px;
+  border-right: 1px solid var(--border-subtle);
+  animation: fadeUp 0.5s var(--ease) both;
+}
+
+.featureCard:last-child {
+  border-right: none;
+}
+
+.featureIcon {
+  display: block;
+  font-size: 20px;
+  color: var(--brand);
+  margin-bottom: 16px;
+  line-height: 1;
+}
+
+.featureTitle {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--text-primary);
+  margin-bottom: 10px;
+  letter-spacing: -0.01em;
+}
+
+.featureBody {
+  font-size: 13px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
