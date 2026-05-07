@@ -58,7 +58,7 @@ class AuthService:
     # GitHub OAuth — sign in / register                                   #
     # ------------------------------------------------------------------ #
 
-    async def _fetch_github_user(self, code: str) -> tuple[dict, str]:
+    async def _fetch_github_user(self, code: str, redirect_uri: str) -> tuple[dict, str]:
         """Exchange code for GitHub user profile + verified email. Returns (gh_user, email)."""
         async with httpx.AsyncClient() as client:
             token_resp = await client.post(
@@ -67,6 +67,7 @@ class AuthService:
                     "client_id": settings.github_client_id,
                     "client_secret": settings.github_client_secret,
                     "code": code,
+                    "redirect_uri": redirect_uri,
                 },
                 headers={"Accept": "application/json"},
                 timeout=10,
@@ -101,7 +102,10 @@ class AuthService:
         return gh_user, email
 
     async def github_callback(self, code: str) -> tuple[UserRead, str, str]:
-        gh_user, email = await self._fetch_github_user(code)
+        gh_user, email = await self._fetch_github_user(
+            code,
+            redirect_uri=f"{settings.backend_url}/api/v1/auth/github/callback",
+            )
 
         async with self.uow:
             user = await self.uow.users.get_by_github_id(str(gh_user["id"]))
@@ -130,7 +134,10 @@ class AuthService:
 
     async def link_github(self, current_user_id: str, code: str) -> UserRead:
         """Attach a GitHub identity to an already-authenticated account."""
-        gh_user, _ = await self._fetch_github_user(code)
+        gh_user, _ = await self._fetch_github_user(
+            code,
+            redirect_uri=f"{settings.backend_url}/api/v1/auth/link/github/callback",
+        )
 
         async with self.uow:
             # Make sure this GitHub account isn't already linked to someone else
@@ -183,7 +190,7 @@ class AuthService:
     # Google OAuth — sign in / register                                   #
     # ------------------------------------------------------------------ #
 
-    async def _fetch_google_user(self, code: str) -> tuple[dict, str]:
+    async def _fetch_google_user(self, code: str, redirect_uri: str) -> tuple[dict, str]:
         """Exchange code for Google user profile. Returns (g_user, email)."""
         async with httpx.AsyncClient() as client:
             token_resp = await client.post(
@@ -193,7 +200,7 @@ class AuthService:
                     "client_secret": settings.google_client_secret,
                     "code": code,
                     "grant_type": "authorization_code",
-                    "redirect_uri": f"{settings.backend_url}/api/v1/auth/google/callback",
+                    "redirect_uri": redirect_uri,
                 },
                 timeout=10,
             )
@@ -215,7 +222,10 @@ class AuthService:
         return g_user, email
 
     async def google_callback(self, code: str) -> tuple[UserRead, str, str]:
-        g_user, email = await self._fetch_google_user(code)
+        g_user, email = await self._fetch_google_user(
+            code,
+            redirect_uri=f"{settings.backend_url}/api/v1/auth/google/callback",
+            )
 
         async with self.uow:
             user = await self.uow.users.get_by_google_id(g_user["id"])
@@ -243,7 +253,10 @@ class AuthService:
 
     async def link_google(self, current_user_id: str, code: str) -> UserRead:
         """Attach a Google identity to an already-authenticated account."""
-        g_user, _ = await self._fetch_google_user(code)
+        g_user, _ = await self._fetch_google_user(
+            code,
+            redirect_uri=f"{settings.backend_url}/api/v1/auth/link/google/callback",
+            )
 
         async with self.uow:
             existing = await self.uow.users.get_by_google_id(g_user["id"])
