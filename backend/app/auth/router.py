@@ -99,8 +99,17 @@ async def github_oauth_start():
 @router.get("/github/callback")
 async def github_oauth_callback(
     code: str,
+    state: str | None = None,
     service: AuthService = Depends(get_auth_service),
 ):
+    if state and state.startswith("link:"):
+        user_id = state.split(":", 1)[1]
+        try:
+            await service.link_github(user_id, code)
+        except Exception as exc:
+            return HTMLResponse(_error_html(str(exc), "link_error"), status_code=200)
+        return HTMLResponse(_success_html("link_success"))
+    
     try:
         _, access_token, refresh_token = await service.github_callback(code)
     except Exception as exc:
@@ -116,13 +125,12 @@ async def github_oauth_callback(
 # ------------------------------------------------------------------ #
 
 @router.get("/link/github")
-async def link_github_start():
+async def link_github_start(current_user: User = Depends(get_current_user)):
     """Opens GitHub OAuth for account linking (not sign-in)."""
     params = urllib.parse.urlencode({
         "client_id": settings.github_client_id,
         "scope": "user:email",
-        # Different callback so we can distinguish link vs sign-in
-        "redirect_uri": f"{settings.backend_url}/api/v1/auth/link/github/callback",
+        "state": f"link:{current_user.id}",
     })
     return RedirectResponse(f"https://github.com/login/oauth/authorize?{params}")
 

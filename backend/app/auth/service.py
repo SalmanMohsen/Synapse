@@ -136,7 +136,7 @@ class AuthService:
         """Attach a GitHub identity to an already-authenticated account."""
         gh_user, _ = await self._fetch_github_user(
             code,
-            redirect_uri=f"{settings.backend_url}/api/v1/auth/link/github/callback",
+            redirect_uri=f"{settings.backend_url}/api/v1/auth/github/callback",
         )
 
         async with self.uow:
