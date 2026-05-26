@@ -31,7 +31,8 @@ get_settings.cache_clear()
 
 # Re-export make_user so conftest fixtures below can use it,
 # and so existing code that does `from conftest import make_user` still works.
-from app.auth.tests.helpers import make_user  # noqa: E402
+from app.auth.tests.helpers import make_user  
+
 
 
 # ── Fakes ─────────────────────────────────────────────────────────────────────
