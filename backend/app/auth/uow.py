@@ -1,38 +1,20 @@
-from abc import ABC, abstractmethod
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.UoW import AbstractUnitOfWork
 from .repository import UserRepository
 
-class AbstractUnitOfWork(ABC):
+
+class AbstractAuthUnitOfWork(AbstractUnitOfWork):
     users: UserRepository
 
-    async def __aenter__(self):
-        return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        if exc_type is not None:
-            await self.rollback()
-
-    @abstractmethod
-    async def commit(self):
-        pass
-
-    @abstractmethod
-    async def rollback(self):
-        pass
-
-class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
-    def __init__(self, session: AsyncSession):
+class SqlAlchemyAuthUnitOfWork(AbstractAuthUnitOfWork):
+    def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.users = UserRepository(session)
 
-    async def __aenter__(self):
-        return await super().__aenter__()
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        await super().__aexit__(exc_type, exc_val, exc_tb)
-
-    async def commit(self):
+    async def commit(self) -> None:
         await self.session.commit()
 
-    async def rollback(self):
+    async def rollback(self) -> None:
         await self.session.rollback()

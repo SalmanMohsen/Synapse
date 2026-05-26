@@ -5,7 +5,7 @@ import redis.asyncio as aioredis
 from fastapi import HTTPException
 
 from app.auth.schemas import LoginRequest, RegisterRequest, UserRead
-from app.auth.uow import AbstractUnitOfWork
+from app.auth.uow import AbstractAuthUnitOfWork
 from app.auth.utils.jwt import (
     create_access_token,
     create_refresh_token,
@@ -18,7 +18,7 @@ settings = get_settings()
 
 
 class AuthService:
-    def __init__(self, uow: AbstractUnitOfWork, redis: aioredis.Redis) -> None:
+    def __init__(self, uow: AbstractAuthUnitOfWork, redis: aioredis.Redis) -> None:
         self.uow = uow
         self.redis = redis
 

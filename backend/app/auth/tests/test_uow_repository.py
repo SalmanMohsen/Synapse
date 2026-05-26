@@ -9,10 +9,8 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
-import pytest_asyncio
-
 from app.auth.repository import UserRepository
-from app.auth.uow import AbstractUnitOfWork, SqlAlchemyUnitOfWork
+from app.auth.uow import AbstractAuthUnitOfWork, SqlAlchemyAuthUnitOfWork
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -41,7 +39,7 @@ class TestSqlAlchemyUnitOfWork:
     @pytest.mark.asyncio
     async def test_aenter_returns_self(self):
         session = _mock_session()
-        uow = SqlAlchemyUnitOfWork(session)
+        uow = SqlAlchemyAuthUnitOfWork(session)
 
         result = await uow.__aenter__()
         assert result is uow
@@ -49,7 +47,7 @@ class TestSqlAlchemyUnitOfWork:
     @pytest.mark.asyncio
     async def test_commit_calls_session_commit(self):
         session = _mock_session()
-        uow = SqlAlchemyUnitOfWork(session)
+        uow = SqlAlchemyAuthUnitOfWork(session)
 
         await uow.commit()
 
@@ -58,7 +56,7 @@ class TestSqlAlchemyUnitOfWork:
     @pytest.mark.asyncio
     async def test_rollback_calls_session_rollback(self):
         session = _mock_session()
-        uow = SqlAlchemyUnitOfWork(session)
+        uow = SqlAlchemyAuthUnitOfWork(session)
 
         await uow.rollback()
 
@@ -67,7 +65,7 @@ class TestSqlAlchemyUnitOfWork:
     @pytest.mark.asyncio
     async def test_exception_triggers_rollback_not_commit(self):
         session = _mock_session()
-        uow = SqlAlchemyUnitOfWork(session)
+        uow = SqlAlchemyAuthUnitOfWork(session)
 
         with pytest.raises(ValueError):
             async with uow:
@@ -79,7 +77,7 @@ class TestSqlAlchemyUnitOfWork:
     @pytest.mark.asyncio
     async def test_users_attribute_is_user_repository(self):
         session = _mock_session()
-        uow = SqlAlchemyUnitOfWork(session)
+        uow = SqlAlchemyAuthUnitOfWork(session)
 
         assert isinstance(uow.users, UserRepository)
 
@@ -87,7 +85,7 @@ class TestSqlAlchemyUnitOfWork:
     async def test_context_manager_no_exception_does_not_auto_commit(self):
         """The UoW does NOT auto-commit; callers must call commit() explicitly."""
         session = _mock_session()
-        uow = SqlAlchemyUnitOfWork(session)
+        uow = SqlAlchemyAuthUnitOfWork(session)
 
         async with uow:
             pass  # no explicit commit
@@ -97,7 +95,7 @@ class TestSqlAlchemyUnitOfWork:
     @pytest.mark.asyncio
     async def test_abstract_uow_cannot_be_instantiated(self):
         with pytest.raises(TypeError):
-            AbstractUnitOfWork()  # type: ignore[abstract]
+            AbstractAuthUnitOfWork()  # type: ignore[abstract]
 
 
 # ════════════════════════════════════════════════════════════════════════════

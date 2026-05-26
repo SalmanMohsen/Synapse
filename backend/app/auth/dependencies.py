@@ -2,7 +2,7 @@ import redis.asyncio as aioredis
 from fastapi import Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth.uow import SqlAlchemyUnitOfWork
+from app.auth.uow import SqlAlchemyAuthUnitOfWork
 from app.auth.models import User
 from app.auth.service import AuthService
 from app.database import get_db
@@ -15,7 +15,7 @@ async def get_auth_service(
     db: AsyncSession = Depends(get_db),
     redis = Depends(get_redis),
 ) -> AuthService:
-    return AuthService(SqlAlchemyUnitOfWork(db), redis)
+    return AuthService(SqlAlchemyAuthUnitOfWork(db), redis)
 
 async def get_current_user(
     request: Request,
