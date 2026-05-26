@@ -13,7 +13,9 @@ from app.config import get_settings
 from app.database import Base
 
 # Import every model here so Base.metadata is fully populated
-from app.auth.models import User  # noqa: F401
+from app.auth.models import User 
+from app.workspace.models import Workspace, WorkspaceMember, WorkspaceInvite  
+
 
 settings = get_settings()
 
