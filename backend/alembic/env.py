@@ -15,6 +15,7 @@ from app.database import Base
 # Import every model here so Base.metadata is fully populated
 from app.auth.models import User 
 from app.workspace.models import Workspace, WorkspaceMember, WorkspaceInvite  
+from app.project.models import Project, ProjectMember
 
 
 settings = get_settings()

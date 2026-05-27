@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.auth.router import router as auth_router
 from app.config import get_settings
+from app.project.router import projects_router, workspace_projects_router
 from app.workspace.router import invite_router, router as workspace_router
 
 settings = get_settings()
@@ -28,3 +29,5 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(workspace_router)
 app.include_router(invite_router)
+app.include_router(workspace_projects_router)
+app.include_router(projects_router)
