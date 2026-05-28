@@ -1,5 +1,6 @@
 from fastapi import HTTPException
 
+from app.channel.models import ApprovalPolicy
 from app.workspace.models import ProjectCreationPolicy
 
 from .models import ProjectRole
@@ -12,6 +13,8 @@ from .schemas import (
     ProjectUpdate,
 )
 from .uow import AbstractProjectUnitOfWork
+
+_LEADS_CHANNEL_NAME = "leads"
 
 
 class ProjectService:
@@ -50,6 +53,16 @@ class ProjectService:
                 project_id=project.id,
                 user_id=creator_id,
                 role=ProjectRole.team_lead,
+            )
+            # Every project must have a leads channel. Create it here so
+            # the invariant is enforced at the DB transaction level rather
+            # than relying on a separate HTTP call after project creation.
+            await self.uow.channels.create(
+                project_id=project.id,
+                name=_LEADS_CHANNEL_NAME,
+                discipline=None,
+                is_leads_channel=True,
+                approval_policy=ApprovalPolicy.lead_only,
             )
             await self.uow.commit()
             return ProjectRead.model_validate(project)

@@ -13,10 +13,6 @@ from .schemas import (
 )
 from .uow import AbstractChannelUnitOfWork
 
-# Leads channel is auto-created at project creation; its name is fixed
-# so every project has a predictable coordination space.
-_LEADS_CHANNEL_NAME = "leads"
-
 
 class ChannelService:
     def __init__(self, uow: AbstractChannelUnitOfWork) -> None:
@@ -50,37 +46,6 @@ class ChannelService:
                 discipline=data.discipline,
                 is_leads_channel=False,
                 approval_policy=data.approval_policy,
-            )
-            await self.uow.commit()
-            return ChannelRead.model_validate(channel)
-
-    async def create_leads_channel(
-        self, project_id: str, requester_id: str
-    ) -> ChannelRead:
-        """
-        Create the private leads channel for a project.
-
-        Called once during project setup. Subsequent calls are rejected so
-        the invariant of one leads channel per project is never broken.
-        Team Leads and workspace owners may call this.
-        """
-        async with self.uow:
-            project = await self._require_project(project_id)
-            await self._require_team_lead_or_owner(project, requester_id)
-
-            existing = await self.uow.channels.get_leads_channel(project_id)
-            if existing is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="A leads channel already exists for this project.",
-                )
-
-            channel = await self.uow.channels.create(
-                project_id=project_id,
-                name=_LEADS_CHANNEL_NAME,
-                discipline=None,
-                is_leads_channel=True,
-                approval_policy=ApprovalPolicy.lead_only,
             )
             await self.uow.commit()
             return ChannelRead.model_validate(channel)
@@ -172,9 +137,19 @@ class ChannelService:
 
         The target must already be a project member — channel membership is
         always a subset of project membership.
+
+        The leads channel is private to Team Leads and workspace owners;
+        regular members cannot be added to it through this route.
         """
         async with self.uow:
             channel = await self._require_channel(channel_id)
+
+            if channel.is_leads_channel:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Members cannot be added to the leads channel directly.",
+                )
+
             project = await self._require_project(channel.project_id)
             await self._require_channel_lead_or_team_lead_or_owner(
                 channel, project, requester_id

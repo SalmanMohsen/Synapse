@@ -108,10 +108,18 @@ class WorkspaceInvite(Base):
         nullable=False,
         index=True,
     )
-    # Populated for project/channel-scoped invites. FKs deferred until
-    # those tables exist.
-    project_id: Mapped[str | None] = mapped_column(String, nullable=True)
-    channel_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    # SET NULL so the invite record is preserved for auditing if the
+    # project or channel is deleted; the token simply becomes workspace-scoped.
+    project_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    channel_id: Mapped[str | None] = mapped_column(
+        String,
+        ForeignKey("channels.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     # Role the invitee receives: "member"/"owner" for workspace invites;
     # "team_lead"/"member"/"advisor"/"viewer" for project invites (future).
     role: Mapped[str] = mapped_column(String(50), nullable=False)

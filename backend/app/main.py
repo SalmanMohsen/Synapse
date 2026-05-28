@@ -6,6 +6,7 @@ from app.auth.router import router as auth_router
 from app.config import get_settings
 from app.project.router import projects_router, workspace_projects_router
 from app.workspace.router import invite_router, router as workspace_router
+from app.channel.router import channels_router, project_channels_router
 
 settings = get_settings()
 
@@ -31,3 +32,5 @@ app.include_router(workspace_router)
 app.include_router(invite_router)
 app.include_router(workspace_projects_router)
 app.include_router(projects_router)
+app.include_router(channels_router)
+app.include_router(project_channels_router)

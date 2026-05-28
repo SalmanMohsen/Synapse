@@ -12,11 +12,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from app.config import get_settings
 from app.database import Base
 
-# Import every model here so Base.metadata is fully populated
-from app.auth.models import User 
-from app.workspace.models import Workspace, WorkspaceMember, WorkspaceInvite  
-from app.project.models import Project, ProjectMember
-
+# Import every model here so Base.metadata is fully populated.
+# These imports are intentionally side-effect-only; the names are never
+# referenced directly in this file.
+from app.auth.models import User  # noqa: F401
+from app.workspace.models import Workspace, WorkspaceMember, WorkspaceInvite  # noqa: F401
+from app.project.models import Project, ProjectMember  # noqa: F401
+from app.channel.models import Channel, ChannelMember  # noqa: F401
 
 settings = get_settings()
 
