@@ -109,12 +109,21 @@ class WorkspaceService:
         self, workspace_id: str, target_user_id: str, requester_id: str
     ) -> None:
         """
-        Owner removes any member (including another owner, but never the
-        last owner). Members may also remove themselves via the same route.
+        Remove a member from the workspace.
+
+        Allowed callers:
+        - Any workspace owner may remove any other member.
+        - Any member may remove themselves (self-removal).
+
+        In both cases the last-owner invariant is enforced: if the target
+        is the last owner, the removal is rejected regardless of who asked.
         """
         async with self.uow:
             await self._require_workspace(workspace_id)
-            await self._require_owner(workspace_id, requester_id)
+
+            # Non-owners may only remove themselves.
+            if requester_id != target_user_id:
+                await self._require_owner(workspace_id, requester_id)
 
             member = await self.uow.members.get_by_workspace_and_user(
                 workspace_id, target_user_id
