@@ -13,6 +13,9 @@ from .schemas import (
 )
 from .uow import AbstractChannelUnitOfWork
 
+# Roles that are project-scoped only and must never get channel membership.
+_CHANNEL_INELIGIBLE_ROLES = {ProjectRole.advisor, ProjectRole.viewer}
+
 
 class ChannelService:
     def __init__(self, uow: AbstractChannelUnitOfWork) -> None:
@@ -29,7 +32,6 @@ class ChannelService:
             project = await self._require_project(project_id)
             await self._require_team_lead_or_owner(project, requester_id)
 
-            # Each discipline may appear only once per project.
             existing_channels = await self.uow.channels.list_by_project(project_id)
             if any(c.discipline == data.discipline for c in existing_channels):
                 raise HTTPException(
@@ -54,14 +56,9 @@ class ChannelService:
         self, project_id: str, requester_id: str
     ) -> list[ChannelRead]:
         """
-        Return all channels in the project.
-
-        Visibility rules (from design doc):
-        - Workspace owners and Team Leads see all channel content.
-        - Channel members see content of their own channels.
-        - All project members see channel *names* regardless — this endpoint
-          returns the channel list (names + metadata) for everyone with
-          project access; content gating is ticket-level.
+        Visibility rules: workspace owners and team leads see all channels;
+        all other project members see channel names (metadata returned here)
+        regardless of assignment — content gating is ticket-level.
         """
         async with self.uow:
             project = await self._require_project(project_id)
@@ -129,7 +126,7 @@ class ChannelService:
         self, channel_id: str, requester_id: str, data: ChannelMemberAdd
     ) -> ChannelMemberRead:
         """
-        Add a project member to a channel.
+        Directly add a project member to a channel.
 
         Who may add:
         - Team Lead or workspace owner (anywhere in the project).
@@ -138,8 +135,9 @@ class ChannelService:
         The target must already be a project member — channel membership is
         always a subset of project membership.
 
-        The leads channel is private to Team Leads and workspace owners;
-        regular members cannot be added to it through this route.
+        Fix #6: advisors and viewers may not be added to channels. Their
+        access is governed by their project role; assigning them to a channel
+        (especially as channel_lead) would contradict their role's intent.
         """
         async with self.uow:
             channel = await self._require_channel(channel_id)
@@ -155,7 +153,6 @@ class ChannelService:
                 channel, project, requester_id
             )
 
-            # Target must be in the project already.
             target_project_member = await self.uow.project_members.get_by_project_and_user(
                 channel.project_id, data.user_id
             )
@@ -165,6 +162,17 @@ class ChannelService:
                     detail=(
                         "The user must be a project member before they can be "
                         "added to a channel. Add them to the project first."
+                    ),
+                )
+
+            # Fix #6: block advisor/viewer from channel membership
+            if target_project_member.role in _CHANNEL_INELIGIBLE_ROLES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Users with the '{target_project_member.role}' role are "
+                        "project-scoped and cannot be assigned to channels. "
+                        "Their access is governed by their project role."
                     ),
                 )
 
@@ -245,11 +253,6 @@ class ChannelService:
         return channel
 
     async def _require_project_access(self, project, requester_id: str):
-        """
-        Allow if the requester is a workspace owner OR any project member.
-        Advisors and viewers pass this check — channel listing is open to
-        all project participants.
-        """
         ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
             project.workspace_id, requester_id
         )
@@ -267,10 +270,6 @@ class ChannelService:
         return project_member
 
     async def _require_team_lead_or_owner(self, project, requester_id: str):
-        """
-        Allow if the requester is a workspace owner OR a project Team Lead.
-        Used for channel-level admin operations (create, update, delete).
-        """
         ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
             project.workspace_id, requester_id
         )
@@ -290,14 +289,6 @@ class ChannelService:
     async def _require_channel_lead_or_team_lead_or_owner(
         self, channel, project, requester_id: str
     ):
-        """
-        Allow if the requester is:
-        - a workspace owner, OR
-        - a project Team Lead (fallback approver for all channels), OR
-        - a Channel Lead of this specific channel.
-
-        Used for channel membership management.
-        """
         ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
             project.workspace_id, requester_id
         )

@@ -1,6 +1,7 @@
 from fastapi import HTTPException
 
 from app.channel.models import ApprovalPolicy
+from app.inbox.service import InboxService
 from app.workspace.models import ProjectCreationPolicy
 
 from .models import ProjectRole
@@ -32,7 +33,7 @@ class ProjectService:
             workspace = await self._require_workspace(workspace_id)
             ws_member = await self._require_workspace_member(workspace_id, creator_id)
 
-            # Policy gate: restricted workspaces only allow owners to create projects
+            # Policy gate
             if workspace.project_creation_policy == ProjectCreationPolicy.restricted:
                 if not ws_member.is_owner:
                     raise HTTPException(
@@ -54,9 +55,7 @@ class ProjectService:
                 user_id=creator_id,
                 role=ProjectRole.team_lead,
             )
-            # Every project must have a leads channel. Create it here so
-            # the invariant is enforced at the DB transaction level rather
-            # than relying on a separate HTTP call after project creation.
+            # Leads channel is created atomically in the same transaction.
             await self.uow.channels.create(
                 project_id=project.id,
                 name=_LEADS_CHANNEL_NAME,
@@ -64,6 +63,24 @@ class ProjectService:
                 is_leads_channel=True,
                 approval_policy=ApprovalPolicy.lead_only,
             )
+
+            # Fix #2: notify all other workspace owners that a new project was created.
+            other_owners = await self.uow.workspace_members.list_owners_except(
+                workspace_id, exclude_user_id=creator_id
+            )
+            for owner in other_owners:
+                await InboxService.create_notification(
+                    self.uow.inbox_items,
+                    user_id=owner.user_id,
+                    title=f"New project created: \"{data.name}\"",
+                    body=f"A new project was created in your workspace by a team member.",
+                    sender_id=creator_id,
+                    workspace_id=workspace_id,
+                    project_id=project.id,
+                    entity_type="project",
+                    entity_id=project.id,
+                )
+
             await self.uow.commit()
             return ProjectRead.model_validate(project)
 
@@ -110,8 +127,6 @@ class ProjectService:
     ) -> None:
         async with self.uow:
             project = await self._require_project(project_id)
-            # Only workspace owners may delete projects (design decision: owners
-            # can delete any project regardless of who created it).
             ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
                 project.workspace_id, requester_id
             )
@@ -140,20 +155,17 @@ class ProjectService:
         self, project_id: str, requester_id: str, data: ProjectMemberAdd
     ) -> ProjectMemberRead:
         """
-        Add a workspace member to this project directly.
+        Direct add (no invite) — used by team leads and owners to immediately
+        assign a workspace member to the project.
 
-        Only team leads (and workspace owners as fallback) may add members.
-        The target must already be a workspace member — project membership
-        is always a subset of workspace membership.
-
-        NOTE: Async token-based invite flow (for member acceptance/refusal)
-        is deferred to Phase 2 when the notification system is built.
+        The invite flow (inbox) should be preferred for the typical onboarding
+        path so the target user can see who is inviting them and accept/decline.
+        Direct add is kept for programmatic and admin use cases.
         """
         async with self.uow:
             project = await self._require_project(project_id)
             await self._require_team_lead_or_owner(project, requester_id)
 
-            # Target must be in the workspace already
             target_ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
                 project.workspace_id, data.user_id
             )
@@ -200,7 +212,6 @@ class ProjectService:
             if member is None:
                 raise HTTPException(status_code=404, detail="Member not found.")
 
-            # Guard: don't demote the last team lead
             if member.role == ProjectRole.team_lead and data.role != ProjectRole.team_lead:
                 lead_count = await self.uow.project_members.count_by_role(
                     project_id, ProjectRole.team_lead
@@ -275,11 +286,6 @@ class ProjectService:
         return project
 
     async def _require_project_visibility(self, project, requester_id: str):
-        """
-        A requester can see a project if they are:
-        - a workspace owner, OR
-        - a project member (any role)
-        """
         ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
             project.workspace_id, requester_id
         )
@@ -297,10 +303,6 @@ class ProjectService:
         return project_member
 
     async def _require_team_lead_or_owner(self, project, requester_id: str):
-        """
-        Allow if the requester is a workspace owner OR a project team lead.
-        Workspace owners act as fallback for all project operations.
-        """
         ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
             project.workspace_id, requester_id
         )

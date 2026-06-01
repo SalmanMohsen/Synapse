@@ -6,10 +6,10 @@ Kept as a plain importable module (not conftest) so tests can do:
 without relying on pytest's sys.path injection of conftest.py.
 """
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
-from app.workspace.models import ProjectCreationPolicy, Workspace, WorkspaceInvite, WorkspaceMember
+from app.workspace.models import ProjectCreationPolicy, Workspace, WorkspaceMember
 
 
 def make_workspace(**overrides) -> MagicMock:
@@ -34,21 +34,3 @@ def make_workspace_member(**overrides) -> MagicMock:
     member.is_owner = overrides.get("is_owner", False)
     member.joined_at = overrides.get("joined_at", datetime.now(timezone.utc))
     return member
-
-
-def make_workspace_invite(**overrides) -> MagicMock:
-    """Return a WorkspaceInvite ORM-like object with sensible defaults."""
-    invite = MagicMock(spec=WorkspaceInvite)
-    invite.id = overrides.get("id", str(uuid.uuid4()))
-    invite.token = overrides.get("token", "test-token-" + str(uuid.uuid4()))
-    invite.workspace_id = overrides.get("workspace_id", str(uuid.uuid4()))
-    invite.project_id = overrides.get("project_id", None)
-    invite.channel_id = overrides.get("channel_id", None)
-    invite.role = overrides.get("role", "member")
-    invite.invited_by = overrides.get("invited_by", None)
-    invite.expires_at = overrides.get(
-        "expires_at", datetime.now(timezone.utc) + timedelta(days=30)
-    )
-    invite.used_at = overrides.get("used_at", None)
-    invite.created_at = overrides.get("created_at", datetime.now(timezone.utc))
-    return invite
