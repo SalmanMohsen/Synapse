@@ -16,7 +16,7 @@ from app.database import Base
 # These imports are intentionally side-effect-only; the names are never
 # referenced directly in this file.
 from app.auth.models import User  # noqa: F401
-from app.workspace.models import Workspace, WorkspaceMember, WorkspaceInvite  # noqa: F401
+from app.workspace.models import Workspace, WorkspaceMember  # noqa: F401
 from app.project.models import Project, ProjectMember  # noqa: F401
 from app.channel.models import Channel, ChannelMember  # noqa: F401
 

@@ -1,7 +1,7 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from .models import Workspace, WorkspaceInvite, WorkspaceMember
+from .models import Workspace, WorkspaceMember
 
 
 class WorkspaceRepository:
@@ -56,6 +56,20 @@ class WorkspaceMemberRepository:
         )
         return list(result.scalars().all())
 
+    async def list_owners_except(
+        self, workspace_id: str, exclude_user_id: str
+    ) -> list[WorkspaceMember]:
+        """Return all owners in the workspace except a specific user. Used to
+        fan out notifications to other owners when a project is created."""
+        result = await self.db.execute(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.is_owner.is_(True),
+                WorkspaceMember.user_id != exclude_user_id,
+            )
+        )
+        return list(result.scalars().all())
+
     async def count_owners(self, workspace_id: str) -> int:
         result = await self.db.execute(
             select(func.count()).where(
@@ -82,29 +96,3 @@ class WorkspaceMemberRepository:
     async def delete(self, member: WorkspaceMember) -> None:
         await self.db.delete(member)
         await self.db.flush()
-
-
-class WorkspaceInviteRepository:
-    def __init__(self, db: AsyncSession) -> None:
-        self.db = db
-
-    async def get_by_token(self, token: str) -> WorkspaceInvite | None:
-        result = await self.db.execute(
-            select(WorkspaceInvite).where(WorkspaceInvite.token == token)
-        )
-        return result.scalar_one_or_none()
-
-    async def create(self, **kwargs) -> WorkspaceInvite:
-        invite = WorkspaceInvite(**kwargs)
-        self.db.add(invite)
-        await self.db.flush()
-        await self.db.refresh(invite)
-        return invite
-
-    async def mark_used(self, invite: WorkspaceInvite) -> WorkspaceInvite:
-        from datetime import datetime, timezone
-
-        invite.used_at = datetime.now(timezone.utc)
-        await self.db.flush()
-        await self.db.refresh(invite)
-        return invite

@@ -1,12 +1,8 @@
 from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel, field_validator
 
 from .models import ProjectCreationPolicy
-
-# Valid roles for workspace-scoped invites only.
-WorkspaceInviteRole = Literal["member", "owner"]
 
 
 # ------------------------------------------------------------------ #
@@ -71,23 +67,3 @@ class WorkspaceMemberRead(BaseModel):
 
 class WorkspaceMemberUpdate(BaseModel):
     is_owner: bool
-
-
-# ------------------------------------------------------------------ #
-# WorkspaceInvite                                                     #
-# ------------------------------------------------------------------ #
-
-
-class WorkspaceInviteCreate(BaseModel):
-    role: WorkspaceInviteRole = "member"
-
-
-class WorkspaceInviteRead(BaseModel):
-    id: str
-    token: str
-    workspace_id: str
-    role: str
-    expires_at: datetime
-    created_at: datetime
-
-    model_config = {"from_attributes": True}

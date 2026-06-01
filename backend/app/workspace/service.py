@@ -1,18 +1,12 @@
-from datetime import datetime, timedelta, timezone
-
 from fastapi import HTTPException
 
 from .schemas import (
-    WorkspaceCreate,
-    WorkspaceInviteCreate,
-    WorkspaceInviteRead,
     WorkspaceMemberRead,
+    WorkspaceCreate,
     WorkspaceRead,
     WorkspaceUpdate,
 )
 from .uow import AbstractWorkspaceUnitOfWork
-
-_WORKSPACE_INVITE_TTL_DAYS = 30
 
 
 class WorkspaceService:
@@ -111,12 +105,16 @@ class WorkspaceService:
         """
         Remove a member from the workspace.
 
+        Fix #5 — cascade cleanup: all of the user's project and channel
+        memberships within this workspace are deleted in the same transaction
+        so the data model invariant (workspace ⊃ project ⊃ channel membership)
+        is never violated.
+
         Allowed callers:
         - Any workspace owner may remove any other member.
         - Any member may remove themselves (self-removal).
 
-        In both cases the last-owner invariant is enforced: if the target
-        is the last owner, the removal is rejected regardless of who asked.
+        The last-owner invariant is enforced regardless of who asked.
         """
         async with self.uow:
             await self._require_workspace(workspace_id)
@@ -139,68 +137,32 @@ class WorkspaceService:
                         detail="Cannot remove the last owner. Assign a new owner first.",
                     )
 
+            # Cascade: remove channel memberships before project memberships
+            # (channel membership is a subset of project membership).
+            projects = await self.uow.projects.list_by_workspace(workspace_id)
+            project_ids = [p.id for p in projects]
+
+            if project_ids:
+                for project_id in project_ids:
+                    # Channel memberships in this project
+                    channels = await self.uow.channels.list_by_project(project_id)
+                    for channel in channels:
+                        cm = await self.uow.channel_members.get_by_channel_and_user(
+                            channel.id, target_user_id
+                        )
+                        if cm is not None:
+                            await self.uow.channel_members.delete(cm)
+
+                    # Project membership
+                    pm = await self.uow.project_members.get_by_project_and_user(
+                        project_id, target_user_id
+                    )
+                    if pm is not None:
+                        await self.uow.project_members.delete(pm)
+
+            # Finally remove the workspace membership itself
             await self.uow.members.delete(member)
             await self.uow.commit()
-
-    # ------------------------------------------------------------------ #
-    # Invites                                                              #
-    # ------------------------------------------------------------------ #
-
-    async def create_invite(
-        self,
-        workspace_id: str,
-        data: WorkspaceInviteCreate,
-        requester_id: str,
-    ) -> WorkspaceInviteRead:
-        """Only owners may create workspace-scope invites."""
-        async with self.uow:
-            await self._require_workspace(workspace_id)
-            await self._require_owner(workspace_id, requester_id)
-
-            expires_at = datetime.now(timezone.utc) + timedelta(
-                days=_WORKSPACE_INVITE_TTL_DAYS
-            )
-            invite = await self.uow.invites.create(
-                workspace_id=workspace_id,
-                role=data.role,
-                invited_by=requester_id,
-                expires_at=expires_at,
-            )
-            await self.uow.commit()
-            return WorkspaceInviteRead.model_validate(invite)
-
-    async def accept_invite(self, token: str, user_id: str) -> WorkspaceRead:
-        async with self.uow:
-            invite = await self.uow.invites.get_by_token(token)
-            if invite is None:
-                raise HTTPException(status_code=404, detail="Invite not found")
-
-            if invite.used_at is not None:
-                raise HTTPException(
-                    status_code=400, detail="Invite has already been used"
-                )
-            if datetime.now(timezone.utc) > invite.expires_at:
-                raise HTTPException(status_code=400, detail="Invite has expired")
-
-            existing = await self.uow.members.get_by_workspace_and_user(
-                invite.workspace_id, user_id
-            )
-            if existing is not None:
-                raise HTTPException(
-                    status_code=409,
-                    detail="You are already a member of this workspace",
-                )
-
-            await self.uow.members.create(
-                workspace_id=invite.workspace_id,
-                user_id=user_id,
-                is_owner=(invite.role == "owner"),
-            )
-            await self.uow.invites.mark_used(invite)
-            await self.uow.commit()
-
-            workspace = await self.uow.workspaces.get_by_id(invite.workspace_id)
-            return WorkspaceRead.model_validate(workspace)
 
     # ------------------------------------------------------------------ #
     # Private helpers                                                      #

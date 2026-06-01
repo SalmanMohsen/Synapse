@@ -4,10 +4,8 @@ from app.auth.models import User
 
 from .dependencies import get_current_user, get_workspace_service
 from .schemas import (
-    WorkspaceCreate,
-    WorkspaceInviteCreate,
-    WorkspaceInviteRead,
     WorkspaceMemberRead,
+    WorkspaceCreate,
     WorkspaceRead,
     WorkspaceUpdate,
 )
@@ -95,36 +93,3 @@ async def remove_member(
     service: WorkspaceService = Depends(get_workspace_service),
 ):
     await service.remove_member(workspace_id, user_id, current_user.id)
-
-
-# ------------------------------------------------------------------ #
-# Invites                                                              #
-# ------------------------------------------------------------------ #
-
-
-@router.post(
-    "/{workspace_id}/invites",
-    response_model=WorkspaceInviteRead,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_invite(
-    workspace_id: str,
-    data: WorkspaceInviteCreate,
-    current_user: User = Depends(get_current_user),
-    service: WorkspaceService = Depends(get_workspace_service),
-):
-    return await service.create_invite(workspace_id, data, current_user.id)
-
-
-# Accept-invite lives outside the /workspaces prefix — the user doesn't
-# know the workspace_id when they click a link; the token carries it.
-invite_router = APIRouter(prefix="/api/v1/invites", tags=["invites"])
-
-
-@invite_router.post("/{token}/accept", response_model=WorkspaceRead)
-async def accept_invite(
-    token: str,
-    current_user: User = Depends(get_current_user),
-    service: WorkspaceService = Depends(get_workspace_service),
-):
-    return await service.accept_invite(token, current_user.id)

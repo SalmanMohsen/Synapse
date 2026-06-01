@@ -4,17 +4,23 @@ Workspace test fixtures.
 Fake repositories are in-memory stand-ins for the SQLAlchemy repos.
 Each fake mirrors the real repo interface exactly so tests exercise
 the service layer in isolation with no database.
+
+Changes vs original:
+- FakeWorkspaceInviteRepository removed (invites now live in inbox module).
+- FakeProjectRepository, FakeProjectMemberRepository, FakeChannelRepository,
+  FakeChannelMemberRepository added so remove_member cascade (Fix #5) can be
+  exercised without a real DB.
+- FakeWorkspaceMemberRepository gets list_owners_except (used by project
+  service for owner notifications — not needed here but kept consistent).
 """
 import uuid
 from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 
-from app.workspace.tests.helpers import (
-    make_workspace,
-    make_workspace_invite,
-    make_workspace_member,
-)
+from app.workspace.service import WorkspaceService
+from app.workspace.tests.helpers import make_workspace, make_workspace_member
 
 
 # ── Fake repositories ─────────────────────────────────────────────────────────
@@ -58,6 +64,14 @@ class FakeWorkspaceMemberRepository:
     async def list_by_workspace(self, workspace_id: str) -> list:
         return [m for m in self._members.values() if m.workspace_id == workspace_id]
 
+    async def list_owners_except(self, workspace_id: str, exclude_user_id: str) -> list:
+        return [
+            m for m in self._members.values()
+            if m.workspace_id == workspace_id
+            and m.is_owner
+            and m.user_id != exclude_user_id
+        ]
+
     async def count_owners(self, workspace_id: str) -> int:
         return sum(
             1
@@ -79,24 +93,64 @@ class FakeWorkspaceMemberRepository:
         self._members.pop((member.workspace_id, member.user_id), None)
 
 
-class FakeWorkspaceInviteRepository:
+class FakeProjectRepository:
+    """Minimal project repo for cascade testing in remove_member."""
+
     def __init__(self):
-        self._invites: dict[str, object] = {}  # keyed by token
+        self._projects: dict[str, object] = {}
 
-    def seed(self, invite) -> None:
-        self._invites[invite.token] = invite
+    def seed(self, project) -> None:
+        self._projects[project.id] = project
 
-    async def get_by_token(self, token: str):
-        return self._invites.get(token)
+    async def list_by_workspace(self, workspace_id: str) -> list:
+        return [p for p in self._projects.values() if p.workspace_id == workspace_id]
 
-    async def create(self, **kwargs) -> object:
-        invite = make_workspace_invite(**kwargs)
-        self.seed(invite)
-        return invite
 
-    async def mark_used(self, invite) -> object:
-        invite.used_at = datetime.now(timezone.utc)
-        return invite
+class FakeProjectMemberRepository:
+    """Minimal project member repo for cascade testing."""
+
+    def __init__(self):
+        # key: (project_id, user_id)
+        self._members: dict[tuple[str, str], object] = {}
+
+    def seed(self, member) -> None:
+        self._members[(member.project_id, member.user_id)] = member
+
+    async def get_by_project_and_user(self, project_id: str, user_id: str):
+        return self._members.get((project_id, user_id))
+
+    async def delete(self, member) -> None:
+        self._members.pop((member.project_id, member.user_id), None)
+
+
+class FakeChannelRepository:
+    """Minimal channel repo for cascade testing."""
+
+    def __init__(self):
+        self._channels: dict[str, object] = {}
+
+    def seed(self, channel) -> None:
+        self._channels[channel.id] = channel
+
+    async def list_by_project(self, project_id: str) -> list:
+        return [c for c in self._channels.values() if c.project_id == project_id]
+
+
+class FakeChannelMemberRepository:
+    """Minimal channel member repo for cascade testing."""
+
+    def __init__(self):
+        # key: (channel_id, user_id)
+        self._members: dict[tuple[str, str], object] = {}
+
+    def seed(self, member) -> None:
+        self._members[(member.channel_id, member.user_id)] = member
+
+    async def get_by_channel_and_user(self, channel_id: str, user_id: str):
+        return self._members.get((channel_id, user_id))
+
+    async def delete(self, member) -> None:
+        self._members.pop((member.channel_id, member.user_id), None)
 
 
 # ── Fake UoW ──────────────────────────────────────────────────────────────────
@@ -107,11 +161,17 @@ class FakeWorkspaceUnitOfWork:
         self,
         workspace_repo: FakeWorkspaceRepository | None = None,
         member_repo: FakeWorkspaceMemberRepository | None = None,
-        invite_repo: FakeWorkspaceInviteRepository | None = None,
+        project_repo: FakeProjectRepository | None = None,
+        project_member_repo: FakeProjectMemberRepository | None = None,
+        channel_repo: FakeChannelRepository | None = None,
+        channel_member_repo: FakeChannelMemberRepository | None = None,
     ):
         self.workspaces = workspace_repo or FakeWorkspaceRepository()
         self.members = member_repo or FakeWorkspaceMemberRepository()
-        self.invites = invite_repo or FakeWorkspaceInviteRepository()
+        self.projects = project_repo or FakeProjectRepository()
+        self.project_members = project_member_repo or FakeProjectMemberRepository()
+        self.channels = channel_repo or FakeChannelRepository()
+        self.channel_members = channel_member_repo or FakeChannelMemberRepository()
         self.committed = False
         self.rolled_back = False
 
@@ -143,16 +203,44 @@ def member_repo():
 
 
 @pytest.fixture
-def invite_repo():
-    return FakeWorkspaceInviteRepository()
+def project_repo():
+    return FakeProjectRepository()
 
 
 @pytest.fixture
-def fake_uow(workspace_repo, member_repo, invite_repo):
-    return FakeWorkspaceUnitOfWork(workspace_repo, member_repo, invite_repo)
+def project_member_repo():
+    return FakeProjectMemberRepository()
+
+
+@pytest.fixture
+def channel_repo():
+    return FakeChannelRepository()
+
+
+@pytest.fixture
+def channel_member_repo():
+    return FakeChannelMemberRepository()
+
+
+@pytest.fixture
+def fake_uow(
+    workspace_repo,
+    member_repo,
+    project_repo,
+    project_member_repo,
+    channel_repo,
+    channel_member_repo,
+):
+    return FakeWorkspaceUnitOfWork(
+        workspace_repo=workspace_repo,
+        member_repo=member_repo,
+        project_repo=project_repo,
+        project_member_repo=project_member_repo,
+        channel_repo=channel_repo,
+        channel_member_repo=channel_member_repo,
+    )
 
 
 @pytest.fixture
 def workspace_service(fake_uow):
-    from app.workspace.service import WorkspaceService
     return WorkspaceService(fake_uow)
