@@ -206,7 +206,15 @@ class ChannelService:
             await self._require_channel_lead_or_team_lead_or_owner(
                 channel, project, requester_id
             )
+            if requester_id != target_user_id:
+                requester_weight = await self._get_user_hierarchy_weight(project, channel, requester_id)
+                target_weight = await self._get_user_hierarchy_weight(project, channel, target_user_id)
 
+                if requester_weight < target_weight:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="You cannot modify the role of a user who holds a higher role hierarchy."
+                    )
             member = await self.uow.channel_members.get_by_channel_and_user(
                 channel_id, target_user_id
             )
@@ -223,9 +231,26 @@ class ChannelService:
         async with self.uow:
             channel = await self._require_channel(channel_id)
             project = await self._require_project(channel.project_id)
+            
+            # 1. Verify the requester has base permission to manage members
             await self._require_channel_lead_or_team_lead_or_owner(
                 channel, project, requester_id
             )
+
+            # 2. Prevent subordinates from kicking superiors (Self-removal is exempt)
+            if requester_id != target_user_id:
+                requester_weight = await self._get_user_hierarchy_weight(
+                    project, channel, requester_id
+                )
+                target_weight = await self._get_user_hierarchy_weight(
+                    project, channel, target_user_id
+                )
+
+                if requester_weight < target_weight:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="You cannot remove a user who holds a higher role hierarchy."
+                    )
 
             member = await self.uow.channel_members.get_by_channel_and_user(
                 channel_id, target_user_id
@@ -240,6 +265,34 @@ class ChannelService:
     # Private helpers                                                      #
     # ------------------------------------------------------------------ #
 
+    async def _get_user_hierarchy_weight(self, project, channel, user_id: str) -> int:
+        """
+        Returns a numeric weight representing the user's highest authority level.
+        3 = Workspace Owner
+        2 = Team Lead
+        1 = Channel Lead
+        0 = Standard Member / Advisor / Viewer
+        """
+        ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
+            project.workspace_id, user_id
+        )
+        if ws_member and ws_member.is_owner:
+            return 3
+
+        project_member = await self.uow.project_members.get_by_project_and_user(
+            project.id, user_id
+        )
+        if project_member and project_member.role == ProjectRole.team_lead:
+            return 2
+
+        channel_member = await self.uow.channel_members.get_by_channel_and_user(
+            channel.id, user_id
+        )
+        if channel_member and channel_member.role == ChannelMemberRole.channel_lead:
+            return 1
+
+        return 0
+    
     async def _require_project(self, project_id: str):
         project = await self.uow.projects.get_by_id(project_id)
         if project is None:
