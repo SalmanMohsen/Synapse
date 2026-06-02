@@ -14,6 +14,7 @@ Changes vs original:
   service for owner notifications — not needed here but kept consistent).
 """
 import uuid
+from app.auth.tests.helpers import make_user
 from datetime import datetime, timezone
 from unittest.mock import MagicMock
 
@@ -71,6 +72,8 @@ class FakeWorkspaceMemberRepository:
             and m.is_owner
             and m.user_id != exclude_user_id
         ]
+    async def list_by_workspace_with_users(self, workspace_id: str) -> list:
+        return [(m, make_user(id=m.user_id, display_name="Test User", email="test@test.com")) for m in self._members.values() if m.workspace_id == workspace_id]
 
     async def count_owners(self, workspace_id: str) -> int:
         return sum(

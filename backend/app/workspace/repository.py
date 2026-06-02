@@ -1,6 +1,6 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.auth.models import User
 from .models import Workspace, WorkspaceMember
 
 
@@ -13,6 +13,14 @@ class WorkspaceRepository:
             select(Workspace).where(Workspace.id == workspace_id)
         )
         return result.scalar_one_or_none()
+
+    async def list_by_user(self, user_id: str) -> list[Workspace]:
+        result = await self.db.execute(
+            select(Workspace)
+            .join(WorkspaceMember)
+            .where(WorkspaceMember.user_id == user_id)
+        )
+        return list(result.scalars().all())
 
     async def create(self, **kwargs) -> Workspace:
         workspace = Workspace(**kwargs)
@@ -47,6 +55,14 @@ class WorkspaceMemberRepository:
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_by_workspace_with_users(self, workspace_id: str) -> list[tuple[WorkspaceMember, User]]:
+        result = await self.db.execute(
+            select(WorkspaceMember, User)
+            .join(User, User.id == WorkspaceMember.user_id)
+            .where(WorkspaceMember.workspace_id == workspace_id)
+        )
+        return list(result.all())
 
     async def list_by_workspace(self, workspace_id: str) -> list[WorkspaceMember]:
         result = await self.db.execute(

@@ -1,5 +1,5 @@
 from fastapi import HTTPException
-
+from app.auth.schemas import UserRead
 from .schemas import (
     WorkspaceMemberRead,
     WorkspaceCreate,
@@ -37,6 +37,13 @@ class WorkspaceService:
             workspace = await self._require_workspace(workspace_id)
             await self._require_member(workspace_id, requester_id)
             return WorkspaceRead.model_validate(workspace)
+        
+    async def list_workspaces(
+        self, requester_id: str
+    ) -> list[WorkspaceRead]:
+        async with self.uow:
+            workspaces = await self.uow.workspaces.list_by_user(requester_id)
+            return [WorkspaceRead.model_validate(w) for w in workspaces]
 
     async def update_workspace(
         self, workspace_id: str, data: WorkspaceUpdate, requester_id: str
@@ -65,14 +72,22 @@ class WorkspaceService:
     # Member management                                                    #
     # ------------------------------------------------------------------ #
 
-    async def list_members(
-        self, workspace_id: str, requester_id: str
-    ) -> list[WorkspaceMemberRead]:
+    async def list_members(self, workspace_id: str, requester_id: str) -> list[WorkspaceMemberRead]:
         async with self.uow:
             await self._require_workspace(workspace_id)
             await self._require_member(workspace_id, requester_id)
-            members = await self.uow.members.list_by_workspace(workspace_id)
-            return [WorkspaceMemberRead.model_validate(m) for m in members]
+            
+            # Use the new joined query
+            rows = await self.uow.members.list_by_workspace_with_users(workspace_id)
+            
+            # Merge the member data with the user data into the Pydantic schema
+            return [
+                WorkspaceMemberRead(
+                    **WorkspaceMemberRead.model_validate(m).model_dump(exclude={"user"}),
+                    user=UserRead.model_validate(u)
+                )
+                for m, u in rows
+            ]
 
     async def add_owner(
         self, workspace_id: str, target_user_id: str, requester_id: str

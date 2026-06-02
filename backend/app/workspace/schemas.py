@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 
+from app.auth.schemas import UserRead
+
 from .models import ProjectCreationPolicy
 
 
@@ -61,7 +63,7 @@ class WorkspaceMemberRead(BaseModel):
     user_id: str
     is_owner: bool
     joined_at: datetime
-
+    user: UserRead | None = None
     model_config = {"from_attributes": True}
 
 

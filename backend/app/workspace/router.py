@@ -46,6 +46,12 @@ async def update_workspace(
 ):
     return await service.update_workspace(workspace_id, data, current_user.id)
 
+@router.get("", response_model=list[WorkspaceRead])
+async def list_workspaces(
+    current_user: User = Depends(get_current_user),
+    service: WorkspaceService = Depends(get_workspace_service),
+):
+    return await service.list_workspaces(current_user.id)
 
 @router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_workspace(
