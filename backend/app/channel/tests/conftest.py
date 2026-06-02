@@ -17,7 +17,7 @@ from app.channel.tests.helpers import make_channel, make_channel_member
 from app.project.models import ProjectRole
 from app.project.tests.helpers import make_project, make_project_member
 from app.workspace.tests.helpers import make_workspace_member
-
+from app.auth.tests.helpers import make_user
 
 # ── Fake workspace repos ──────────────────────────────────────────────────────
 
@@ -124,6 +124,9 @@ class FakeChannelMemberRepository:
         for k, v in kwargs.items():
             setattr(member, k, v)
         return member
+    
+    async def list_by_channel_with_users(self, channel_id: str) -> list:
+        return [(m, make_user(id=m.user_id, display_name="Test User", email="test@test.com")) for m in self._members.values() if m.channel_id == channel_id]
 
     async def delete(self, member) -> None:
         self._members.pop((member.channel_id, member.user_id), None)

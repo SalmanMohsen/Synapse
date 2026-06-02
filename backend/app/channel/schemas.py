@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 
+from app.auth.schemas import UserRead
+
 from .models import ApprovalPolicy, ChannelDiscipline, ChannelMemberRole
 
 
@@ -75,5 +77,5 @@ class ChannelMemberRead(BaseModel):
     user_id: str
     role: ChannelMemberRole
     joined_at: datetime
-
+    user: UserRead | None = None
     model_config = {"from_attributes": True}

@@ -1,6 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.auth.models import User
 from .models import Channel, ChannelMember, ChannelMemberRole
 
 
@@ -79,6 +79,14 @@ class ChannelMemberRepository:
         await self.db.flush()
         await self.db.refresh(member)
         return member
+
+    async def list_by_channel_with_users(self, channel_id: str) -> list[tuple[ChannelMember, User]]:
+        result = await self.db.execute(
+            select(ChannelMember, User)
+            .join(User, User.id == ChannelMember.user_id)
+            .where(ChannelMember.channel_id == channel_id)
+        )
+        return list(result.all())
 
     async def update(self, member: ChannelMember, **kwargs) -> ChannelMember:
         for key, value in kwargs.items():

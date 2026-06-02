@@ -1,5 +1,5 @@
 from fastapi import HTTPException
-
+from app.auth.schemas import UserRead
 from app.project.models import ProjectRole
 
 from .models import ApprovalPolicy, ChannelMemberRole
@@ -64,7 +64,19 @@ class ChannelService:
             project = await self._require_project(project_id)
             await self._require_project_access(project, requester_id)
             channels = await self.uow.channels.list_by_project(project_id)
-            return [ChannelRead.model_validate(c) for c in channels]
+            filtered_channels = []
+            for c in channels:
+                if c.is_leads_channel:
+                    try:
+                        await self._require_leads_channel_access(project, requester_id)
+                        filtered_channels.append(c)
+                    except HTTPException:
+                        # Dynamically hide the leads channel if they aren't eligible
+                        continue
+                else:
+                    filtered_channels.append(c)
+                    
+            return [ChannelRead.model_validate(c) for c in filtered_channels]
 
     async def get_channel(
         self, channel_id: str, requester_id: str
@@ -73,6 +85,9 @@ class ChannelService:
             channel = await self._require_channel(channel_id)
             project = await self._require_project(channel.project_id)
             await self._require_project_access(project, requester_id)
+            if channel.is_leads_channel:
+                await self._require_leads_channel_access(project, requester_id)
+                
             return ChannelRead.model_validate(channel)
 
     async def update_channel(
@@ -112,15 +127,23 @@ class ChannelService:
     # Member management                                                    #
     # ------------------------------------------------------------------ #
 
-    async def list_members(
-        self, channel_id: str, requester_id: str
-    ) -> list[ChannelMemberRead]:
+    async def list_members(self, channel_id: str, requester_id: str) -> list[ChannelMemberRead]:
         async with self.uow:
             channel = await self._require_channel(channel_id)
             project = await self._require_project(channel.project_id)
             await self._require_project_access(project, requester_id)
-            members = await self.uow.channel_members.list_by_channel(channel_id)
-            return [ChannelMemberRead.model_validate(m) for m in members]
+            if channel.is_leads_channel:
+                await self._require_leads_channel_access(project, requester_id)
+            # Use the new joined query
+            rows = await self.uow.channel_members.list_by_channel_with_users(channel_id)
+            
+            return [
+                ChannelMemberRead(
+                    **ChannelMemberRead.model_validate(m).model_dump(exclude={"user"}),
+                    user=UserRead.model_validate(u)
+                )
+                for m, u in rows
+            ]
 
     async def add_member(
         self, channel_id: str, requester_id: str, data: ChannelMemberAdd
@@ -202,6 +225,11 @@ class ChannelService:
     ) -> ChannelMemberRead:
         async with self.uow:
             channel = await self._require_channel(channel_id)
+            if channel.is_leads_channel:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Members cannot be manually removed from the leads channel. Membership is automatically managed by project and workspace roles."
+                )
             project = await self._require_project(channel.project_id)
             await self._require_channel_lead_or_team_lead_or_owner(
                 channel, project, requester_id
@@ -230,6 +258,11 @@ class ChannelService:
     ) -> None:
         async with self.uow:
             channel = await self._require_channel(channel_id)
+            if channel.is_leads_channel:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Members cannot be manually removed from the leads channel. Membership is automatically managed by project and workspace roles."
+                )
             project = await self._require_project(channel.project_id)
             
             # 1. Verify the requester has base permission to manage members
@@ -338,6 +371,30 @@ class ChannelService:
                 detail="Only Team Leads (or workspace owners) can perform this action.",
             )
         return project_member
+
+    async def _require_leads_channel_access(self, project, user_id: str) -> None:
+        """
+        Enforces that only Workspace Owners, Team Leads, Advisors, 
+        and Viewers can access the leads channel.
+        """
+        # 1. Workspace owners always have access
+        ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
+            project.workspace_id, user_id
+        )
+        if ws_member and ws_member.is_owner:
+            return
+
+        # 2. Project Team Leads, Advisors, and Viewers have access
+        pm = await self.uow.project_members.get_by_project_and_user(
+            project.id, user_id
+        )
+        if pm and pm.role in (ProjectRole.team_lead, ProjectRole.advisor, ProjectRole.viewer):
+            return
+
+        raise HTTPException(
+            status_code=403,
+            detail="You are not authorized to view or enter the leads channel.",
+        )
 
     async def _require_channel_lead_or_team_lead_or_owner(
         self, channel, project, requester_id: str
