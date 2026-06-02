@@ -1,70 +1,33 @@
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '@/features/auth/store/authSlice'
-import { useLogout } from '@/features/auth/hooks/useAuth'
+import WorkspacesPage from '@/features/workspace/pages/WorkspacesPage'
 import styles from './LandingPage.module.css'
 
 export default function LandingPage() {
   const user = useAuthStore((s) => s.user)
-  const logout = useLogout()
+
+  // Authenticated users see the workspace picker
+  if (user) return <WorkspacesPage />
+
+  // Guests see the marketing page
+  return <MarketingPage />
+}
+
+function MarketingPage() {
   const navigate = useNavigate()
 
   return (
     <div className={styles.page}>
-
-      {/* ── Navbar ── */}
       <header className={styles.navbar}>
         <div className={styles.navInner}>
           <span className={styles.logo}>Synapse</span>
-
           <nav className={styles.navRight}>
-            {user ? (
-              <>
-                <div className={styles.userInfo}>
-                  {user.avatar_url ? (
-                    <img
-                      src={user.avatar_url}
-                      alt=""
-                      className={styles.avatar}
-                    />
-                  ) : (
-                    <div className={styles.avatarFallback}>
-                      {user.display_name?.[0]?.toUpperCase() ?? '?'}
-                    </div>
-                  )}
-                  <span className={styles.displayName}>{user.display_name}</span>
-                </div>
-                <button
-                  className={styles.btnGhost}
-                  onClick={() => logout.mutate()}
-                  disabled={logout.isPending}
-                >
-                  Sign out
-                </button>
-                <button className={styles.btnGhost} onClick={() => navigate('/settings')}>
-                    Settings
-                </button>
-              </>
-            ) : (
-              <>
-                <button
-                  className={styles.btnGhost}
-                  onClick={() => navigate('/login')}
-                >
-                  Sign in
-                </button>
-                <button
-                  className={styles.btnPrimary}
-                  onClick={() => navigate('/register')}
-                >
-                  Get started
-                </button>
-              </>
-            )}
+            <button className={styles.btnGhost} onClick={() => navigate('/login')}>Sign in</button>
+            <button className={styles.btnPrimary} onClick={() => navigate('/register')}>Get started</button>
           </nav>
         </div>
       </header>
 
-      {/* ── Hero ── */}
       <main className={styles.hero}>
         <div className={styles.heroInner}>
           <div className={styles.badge}>AI-native developer collaboration</div>
@@ -78,26 +41,17 @@ export default function LandingPage() {
             detects consensus, and opens a pull request — with human approval
             at every step.
           </p>
-          {!user && (
-            <div className={styles.heroCta}>
-              <button
-                className={styles.btnPrimary}
-                onClick={() => navigate('/register')}
-              >
-                Start building
-              </button>
-              <button
-                className={styles.btnGhost}
-                onClick={() => navigate('/login')}
-              >
-                Sign in
-              </button>
-            </div>
-          )}
+          <div className={styles.heroCta}>
+            <button className={styles.btnPrimary} onClick={() => navigate('/register')}>
+              Start building
+            </button>
+            <button className={styles.btnGhost} onClick={() => navigate('/login')}>
+              Sign in
+            </button>
+          </div>
         </div>
       </main>
 
-      {/* ── Feature grid ── */}
       <section className={styles.features}>
         {FEATURES.map((f) => (
           <div key={f.title} className={styles.featureCard}>
@@ -107,7 +61,6 @@ export default function LandingPage() {
           </div>
         ))}
       </section>
-
     </div>
   )
 }
@@ -131,6 +84,6 @@ const FEATURES = [
   {
     icon: '⌥',
     title: 'Discipline channels',
-    body: 'Frontend, Backend, Database, DevOps, AI — every channel carries the right specialty context for the agent that picks up the work.',
+    body: 'Frontend, Backend, Database, DevOps, AI — every channel carries the right specialty context for the agent.',
   },
 ]

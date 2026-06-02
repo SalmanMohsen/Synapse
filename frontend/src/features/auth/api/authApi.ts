@@ -14,6 +14,9 @@ export const authApi = {
   getMe: (): Promise<User> =>
     api.get<User>('/auth/me').then((r) => r.data),
 
+  searchUsers: (q: string): Promise<User[]> =>
+    api.get<User[]>('/auth/users/search', { params: { q } }).then((r) => r.data),
+
   unlinkGithub: (): Promise<User> =>
     api.delete<User>('/auth/link/github').then((r) => r.data),
 
