@@ -1,7 +1,7 @@
 import urllib.parse
 from fastapi import APIRouter, Depends, Request, Response
 from fastapi.responses import HTMLResponse, RedirectResponse
-
+from fastapi import Query
 from app.auth.dependencies import get_auth_service, get_current_user
 from app.auth.models import User
 from app.auth.schemas import LoginRequest, RegisterRequest, UserRead
@@ -157,6 +157,23 @@ async def unlink_github(
 ):
     return await service.unlink_github(current_user.id)
 
+
+@router.get("/users/search", response_model=list[UserRead])
+async def search_users(
+    q: str = Query(..., min_length=2, description="Search by email or display name"),
+    current_user: User = Depends(get_current_user),
+    service: AuthService = Depends(get_auth_service),
+):
+    """
+    Search for users by name or email. 
+    Useful for frontend autocomplete dropdowns when sending invites.
+    """
+    # Optional: You could filter out current_user.id here if you don't 
+    # want users to see themselves in the search results when inviting.
+    users = await service.search_users(q)
+    
+    # Filter out the person making the request so they can't invite themselves
+    return [u for u in users if u.id != current_user.id]
 
 # ------------------------------------------------------------------ #
 # Google OAuth — sign in / register                                    #

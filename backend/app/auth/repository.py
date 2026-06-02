@@ -1,7 +1,7 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from .models import User
-
+from sqlalchemy import or_
 class UserRepository:
     def __init__(self, db: AsyncSession) -> None:
         self.db = db
@@ -9,7 +9,22 @@ class UserRepository:
     async def get_by_id(self, user_id: str) -> User | None:
         result = await self.db.execute(select(User).where(User.id == user_id))
         return result.scalar_one_or_none()
-
+    
+    async def search_users(self, query_string: str, limit: int = 10) -> list[User]:
+        """Search users by display name or email."""
+        search_term = f"%{query_string}%"
+        result = await self.db.execute(
+            select(User)
+            .where(
+                or_(
+                    User.display_name.ilike(search_term),
+                    User.email.ilike(search_term)
+                )
+            )
+            .limit(limit)
+        )
+        return list(result.scalars().all())
+    
     async def get_by_email(self, email: str) -> User | None:
         result = await self.db.execute(select(User).where(User.email == email))
         return result.scalar_one_or_none()

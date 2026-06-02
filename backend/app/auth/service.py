@@ -53,7 +53,16 @@ class AuthService:
             access_token, _ = create_access_token(user.id)
             refresh_token, _ = create_refresh_token(user.id)
             return UserRead.model_validate(user), access_token, refresh_token
-
+        
+    async def search_users(self, query: str, limit: int = 10) -> list[UserRead]:
+        """Search for users to invite them to workspaces/projects/channels."""
+        clean_query = query.strip()
+        if len(clean_query) < 2:
+            return []  # Return empty if the query is too short
+            
+        async with self.uow:
+            users = await self.uow.users.search_users(clean_query, limit)
+            return [UserRead.model_validate(u) for u in users]
     # ------------------------------------------------------------------ #
     # GitHub OAuth — sign in / register                                   #
     # ------------------------------------------------------------------ #
