@@ -1,7 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from app.UoW import AbstractUnitOfWork
-from app.channel.repository import ChannelRepository
+from app.channel.repository import ChannelRepository, ChannelMemberRepository
 from app.inbox.repository import InboxItemRepository
 from app.workspace.repository import WorkspaceMemberRepository, WorkspaceRepository
 
@@ -14,7 +13,7 @@ class AbstractProjectUnitOfWork(AbstractUnitOfWork):
     projects: ProjectRepository
     project_members: ProjectMemberRepository
     channels: ChannelRepository
-    # For fanning out owner notifications on project creation (Fix #2).
+    channel_members: ChannelMemberRepository
     inbox_items: InboxItemRepository
 
 
@@ -26,6 +25,7 @@ class SqlAlchemyProjectUnitOfWork(AbstractProjectUnitOfWork):
         self.projects = ProjectRepository(session)
         self.project_members = ProjectMemberRepository(session)
         self.channels = ChannelRepository(session)
+        self.channel_members = ChannelMemberRepository(session)
         self.inbox_items = InboxItemRepository(session)
 
     async def commit(self) -> None:

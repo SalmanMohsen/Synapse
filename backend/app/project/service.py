@@ -1,5 +1,5 @@
 from fastapi import HTTPException
-
+from app.auth.schemas import UserRead
 from app.channel.models import ApprovalPolicy
 from app.inbox.service import InboxService
 from app.workspace.models import ProjectCreationPolicy
@@ -14,6 +14,7 @@ from .schemas import (
     ProjectUpdate,
 )
 from .uow import AbstractProjectUnitOfWork
+from app.channel.models import ChannelMemberRole
 
 _LEADS_CHANNEL_NAME = "leads"
 
@@ -56,7 +57,7 @@ class ProjectService:
                 role=ProjectRole.team_lead,
             )
             # Leads channel is created atomically in the same transaction.
-            await self.uow.channels.create(
+            leads_channel = await self.uow.channels.create(
                 project_id=project.id,
                 name=_LEADS_CHANNEL_NAME,
                 discipline=None,
@@ -64,10 +65,23 @@ class ProjectService:
                 approval_policy=ApprovalPolicy.lead_only,
             )
 
+            await self.uow.channel_members.create(
+                channel_id=leads_channel.id,
+                user_id=creator_id,
+                role=ChannelMemberRole.channel_lead
+            )
+            
             # Fix #2: notify all other workspace owners that a new project was created.
             other_owners = await self.uow.workspace_members.list_owners_except(
                 workspace_id, exclude_user_id=creator_id
             )
+            for owner in other_owners:
+                await self.uow.channel_members.create(
+                    channel_id=leads_channel.id,
+                    user_id=owner.user_id,
+                    role=ChannelMemberRole.member
+                )
+
             for owner in other_owners:
                 await InboxService.create_notification(
                     self.uow.inbox_items,
@@ -142,15 +156,21 @@ class ProjectService:
     # Member management                                                    #
     # ------------------------------------------------------------------ #
 
-    async def list_members(
-        self, project_id: str, requester_id: str
-    ) -> list[ProjectMemberRead]:
+    async def list_members(self, project_id: str, requester_id: str) -> list[ProjectMemberRead]:
         async with self.uow:
             project = await self._require_project(project_id)
             await self._require_project_visibility(project, requester_id)
-            members = await self.uow.project_members.list_by_project(project_id)
-            return [ProjectMemberRead.model_validate(m) for m in members]
-
+            
+            # Use the new joined query
+            rows = await self.uow.project_members.list_by_project_with_users(project_id)
+            return [
+                ProjectMemberRead(
+                    **ProjectMemberRead.model_validate(m).model_dump(exclude={"user"}),
+                    user=UserRead.model_validate(u)
+                )
+                for m, u in rows
+            ]
+        
     async def add_member(
         self, project_id: str, requester_id: str, data: ProjectMemberAdd
     ) -> ProjectMemberRead:
@@ -192,6 +212,20 @@ class ProjectService:
                 user_id=data.user_id,
                 role=data.role,
             )
+
+            if data.role in (ProjectRole.team_lead, ProjectRole.advisor, ProjectRole.viewer):
+                leads_channel = await self.uow.channels.get_leads_channel(project_id)
+                if leads_channel:
+                    await self.uow.channel_members.create(
+                        channel_id=leads_channel.id,
+                        user_id=data.user_id,
+                        role=(
+                            ChannelMemberRole.channel_lead 
+                            if data.role == ProjectRole.team_lead 
+                            else ChannelMemberRole.member
+                        )
+                    )
+
             await self.uow.commit()
             return ProjectMemberRead.model_validate(member)
 
@@ -226,6 +260,31 @@ class ProjectService:
                     )
 
             member = await self.uow.project_members.update(member, role=data.role)
+            if data.role in (ProjectRole.team_lead, ProjectRole.advisor, ProjectRole.viewer):
+                leads_channel = await self.uow.channels.get_leads_channel(project_id)
+                if leads_channel:
+                    existing_cm = await self.uow.channel_members.get_by_channel_and_user(
+                        leads_channel.id, target_user_id
+                    )
+                    
+                    target_channel_role = (
+                        ChannelMemberRole.channel_lead 
+                        if data.role == ProjectRole.team_lead 
+                        else ChannelMemberRole.member
+                    )
+
+                    if not existing_cm:
+                        await self.uow.channel_members.create(
+                            channel_id=leads_channel.id,
+                            user_id=target_user_id,
+                            role=target_channel_role
+                        )
+                    elif existing_cm.role != target_channel_role and data.role == ProjectRole.team_lead:
+                        # Upgrade their channel role to channel_lead if they are now a team_lead
+                        await self.uow.channel_members.update(
+                            existing_cm, role=ChannelMemberRole.channel_lead
+                        )
+
             await self.uow.commit()
             return ProjectMemberRead.model_validate(member)
 

@@ -1,6 +1,6 @@
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.auth.models import User
 from .models import Project, ProjectMember, ProjectRole
 
 
@@ -82,6 +82,14 @@ class ProjectMemberRepository:
             )
         )
         return result.scalar_one()
+
+    async def list_by_project_with_users(self, project_id: str) -> list[tuple[ProjectMember, User]]:
+        result = await self.db.execute(
+            select(ProjectMember, User)
+            .join(User, User.id == ProjectMember.user_id)
+            .where(ProjectMember.project_id == project_id)
+        )
+        return list(result.all())
 
     async def create(self, **kwargs) -> ProjectMember:
         member = ProjectMember(**kwargs)

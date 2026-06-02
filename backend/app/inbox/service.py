@@ -382,6 +382,18 @@ class InboxService:
             user_id=item.user_id,
             role=item.role,
         )
+        if item.role in ("team_lead", "advisor", "viewer"):
+            leads_channel = await self.uow.channels.get_leads_channel(item.project_id)
+            if leads_channel:
+                await self.uow.channel_members.create(
+                    channel_id=leads_channel.id,
+                    user_id=item.user_id,
+                    role=(
+                        ChannelMemberRole.channel_lead 
+                        if item.role == "team_lead" 
+                        else ChannelMemberRole.member
+                    )
+                )
 
     async def _accept_channel_invite(self, item: InboxItem) -> None:
         if item.channel_id is None:

@@ -13,7 +13,7 @@ FakeProjectMemberRepository so list_by_workspace_for_user can filter
 correctly without a real SQL JOIN — the UoW wires this up at construction.
 """
 import pytest
-
+from app.auth.tests.helpers import make_user
 from app.project.models import ProjectRole
 from app.project.service import ProjectService
 from app.project.tests.helpers import make_project, make_project_member
@@ -39,7 +39,10 @@ class FakeWorkspaceMemberRepository:
 
     def seed(self, member) -> None:
         self._members[(member.workspace_id, member.user_id)] = member
-
+        
+    async def list_by_project_with_users(self, project_id: str) -> list:
+        return [(m, make_user(id=m.user_id, display_name="Test User", email="test@test.com")) for m in self._members.values() if m.project_id == project_id]
+    
     async def get_by_workspace_and_user(self, workspace_id: str, user_id: str):
         return self._members.get((workspace_id, user_id))
 

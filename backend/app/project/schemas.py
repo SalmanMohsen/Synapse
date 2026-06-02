@@ -2,6 +2,8 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 
+from app.auth.schemas import UserRead
+
 from .models import ProjectRole
 
 
@@ -95,5 +97,5 @@ class ProjectMemberRead(BaseModel):
     user_id: str
     role: ProjectRole
     joined_at: datetime
-
+    user: UserRead | None = None
     model_config = {"from_attributes": True}
