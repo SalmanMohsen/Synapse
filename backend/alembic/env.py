@@ -19,6 +19,7 @@ from app.auth.models import User  # noqa: F401
 from app.workspace.models import Workspace, WorkspaceMember  # noqa: F401
 from app.project.models import Project, ProjectMember  # noqa: F401
 from app.channel.models import Channel, ChannelMember  # noqa: F401
+from app.inbox.models import InboxItem 
 
 settings = get_settings()
 
