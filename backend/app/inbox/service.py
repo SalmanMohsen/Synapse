@@ -505,7 +505,7 @@ class InboxService:
         pm = await self.uow.project_members.get_by_project_and_user(
             project.id, requester_id
         )
-        if pm is None or pm.role != "team_lead":
+        if pm is None or pm.role != ProjectRole.team_lead:
             raise HTTPException(
                 status_code=403,
                 detail="Only Team Leads (or workspace owners) can send project invites.",
@@ -524,7 +524,7 @@ class InboxService:
         pm = await self.uow.project_members.get_by_project_and_user(
             project.id, requester_id
         )
-        if pm and pm.role == "team_lead":
+        if pm and pm.role == ProjectRole.team_lead:
             return pm
 
         cm = await self.uow.channel_members.get_by_channel_and_user(
