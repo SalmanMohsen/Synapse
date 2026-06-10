@@ -20,6 +20,10 @@ from app.workspace.models import Workspace, WorkspaceMember  # noqa: F401
 from app.project.models import Project, ProjectMember  # noqa: F401
 from app.channel.models import Channel, ChannelMember  # noqa: F401
 from app.inbox.models import InboxItem 
+from app.ticket.models import Ticket          # noqa: F401
+from app.message.models import Message        # noqa: F401
+from app.thread_state.models import ThreadState  # noqa: F401
+from app.github.models import GitIntegration, WebhookEvent  # noqa: F401
 
 settings = get_settings()
 

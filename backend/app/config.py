@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     google_client_id: str = ""
     google_client_secret: str = ""
 
+    # GitHub App credentials (repository integration)
+    github_app_id: str = ""
+    github_app_private_key_base64: str = ""  # base64-encoded PEM private key
+    github_webhook_secret: str = ""
+
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
 
