@@ -48,8 +48,6 @@ class ProjectService:
             project = await self.uow.projects.create(
                 workspace_id=workspace_id,
                 name=data.name,
-                github_app_installation_id=data.github_app_installation_id,
-                default_branch=data.default_branch,
             )
             await self.uow.project_members.create(
                 project_id=project.id,

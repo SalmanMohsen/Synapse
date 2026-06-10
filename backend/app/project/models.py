@@ -35,12 +35,7 @@ class Project(Base):
         index=True,
     )
     name: Mapped[str] = mapped_column(String(100), nullable=False)
-    github_app_installation_id: Mapped[str | None] = mapped_column(
-        String(100), nullable=True
-    )
-    default_branch: Mapped[str] = mapped_column(
-        String(100), nullable=False, default="main"
-    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
