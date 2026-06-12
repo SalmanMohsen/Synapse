@@ -1,6 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.auth.models import User
 from .models import Message
 
 
@@ -20,6 +20,22 @@ class MessageRepository:
             select(Message).where(Message.id == message_id)
         )
         return result.scalar_one_or_none()
+
+    async def get_by_id_with_author(
+        self, message_id: str
+    ) -> tuple[Message, User | None] | None:
+        """Fetch a single message with its author in one query.
+ 
+        Returns None when message_id doesn't exist.
+        Returns (message, None) for system messages (author_id IS NULL).
+        """
+        result = await self.db.execute(
+            select(Message, User)
+            .outerjoin(User, User.id == Message.author_id)
+            .where(Message.id == message_id)
+        )
+        row = result.one_or_none()
+        return (row[0], row[1]) if row is not None else None
 
     async def list_by_ticket_paginated(
         self,
@@ -62,7 +78,42 @@ class MessageRepository:
         # Restore chronological order: oldest first, newest last.
         rows.reverse()
         return rows, has_more
-
+    
+    async def list_by_ticket_paginated_with_authors(
+        self,
+        ticket_id: str,
+        before_id: str | None = None,
+        limit: int = 50,
+    ) -> tuple[list[tuple[Message, User | None]], bool]:
+        """Same as list_by_ticket_paginated but joins the author User in one query.
+ 
+        System messages (author_id IS NULL) produce (message, None) tuples.
+        """
+        query = (
+            select(Message, User)
+            .outerjoin(User, User.id == Message.author_id)
+            .where(Message.ticket_id == ticket_id)
+        )
+ 
+        if before_id is not None:
+            anchor_result = await self.db.execute(
+                select(Message.created_at).where(Message.id == before_id)
+            )
+            anchor_created_at = anchor_result.scalar_one_or_none()
+            if anchor_created_at is not None:
+                query = query.where(Message.created_at < anchor_created_at)
+ 
+        query = query.order_by(Message.created_at.desc()).limit(limit + 1)
+        result = await self.db.execute(query)
+        rows = list(result.all())  # list[Row(Message, User | None)]
+ 
+        has_more = len(rows) > limit
+        if has_more:
+            rows = rows[:limit]
+ 
+        rows.reverse()
+        return [(row[0], row[1]) for row in rows], has_more
+    
     async def update(self, message: Message, **kwargs) -> Message:
         """Generic field updater used for both edits and soft-deletes.
 
