@@ -4,7 +4,14 @@ from app.auth.dependencies import get_current_user
 from app.auth.models import User
 
 from .dependencies import get_ticket_service
-from .schemas import TicketCreate, TicketRead, TicketUpdate
+from .schemas import (
+    TicketCreate,
+    TicketDetailResponse,
+    TicketRead,
+    TicketRouteRequest,
+    TicketSplitRequest,
+    TicketUpdate,
+)
 from .service import TicketService
 
 # Channel-scoped: create + list tickets for a channel
@@ -73,3 +80,40 @@ async def update_ticket(
     service: TicketService = Depends(get_ticket_service),
 ):
     return await service.update_ticket(ticket_id, current_user.id, data)
+
+@tickets_router.post("/{ticket_id}/route", response_model=TicketRead)
+async def route_ticket(
+    ticket_id: str,
+    data: TicketRouteRequest,
+    current_user: User = Depends(get_current_user),
+    service: TicketService = Depends(get_ticket_service),
+):
+    return await service.route_ticket(ticket_id, current_user.id, data)
+ 
+ 
+@tickets_router.post("/{ticket_id}/activate", response_model=TicketRead)
+async def activate_ticket(
+    ticket_id: str,
+    current_user: User = Depends(get_current_user),
+    service: TicketService = Depends(get_ticket_service),
+):
+    return await service.activate_ticket(ticket_id, current_user.id)
+ 
+ 
+@tickets_router.post("/{ticket_id}/close", response_model=TicketRead)
+async def close_ticket(
+    ticket_id: str,
+    current_user: User = Depends(get_current_user),
+    service: TicketService = Depends(get_ticket_service),
+):
+    return await service.close_ticket(ticket_id, current_user.id)
+ 
+ 
+@tickets_router.post("/{ticket_id}/split", response_model=TicketRead)
+async def split_ticket(
+    ticket_id: str,
+    data: TicketSplitRequest,
+    current_user: User = Depends(get_current_user),
+    service: TicketService = Depends(get_ticket_service),
+):
+    return await service.split_ticket(ticket_id, current_user.id, data)
