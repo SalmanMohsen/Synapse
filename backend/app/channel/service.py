@@ -75,7 +75,7 @@ class ChannelService:
                         continue
                 else:
                     filtered_channels.append(c)
-                    
+
             return [ChannelRead.model_validate(c) for c in filtered_channels]
 
     async def get_channel(
@@ -87,7 +87,7 @@ class ChannelService:
             await self._require_project_access(project, requester_id)
             if channel.is_leads_channel:
                 await self._require_leads_channel_access(project, requester_id)
-                
+
             return ChannelRead.model_validate(channel)
 
     async def update_channel(
@@ -136,7 +136,7 @@ class ChannelService:
                 await self._require_leads_channel_access(project, requester_id)
             # Use the new joined query
             rows = await self.uow.channel_members.list_by_channel_with_users(channel_id)
-            
+
             return [
                 ChannelMemberRead(
                     **ChannelMemberRead.model_validate(m).model_dump(exclude={"user"}),
@@ -213,6 +213,13 @@ class ChannelService:
                 user_id=data.user_id,
                 role=data.role,
             )
+
+            # §7.3 — auto-sync: channel leads get leads channel membership.
+            if data.role == ChannelMemberRole.channel_lead:
+                await self._add_to_leads_channel_if_needed(
+                    channel.project_id, data.user_id
+                )
+
             await self.uow.commit()
             return ChannelMemberRead.model_validate(member)
 
@@ -250,6 +257,17 @@ class ChannelService:
                 raise HTTPException(status_code=404, detail="Member not found.")
 
             member = await self.uow.channel_members.update(member, role=data.role)
+
+            # §7.2 — auto-sync leads channel membership on role change.
+            if data.role == ChannelMemberRole.channel_lead:
+                await self._add_to_leads_channel_if_needed(
+                    channel.project_id, target_user_id
+                )
+            elif data.role == ChannelMemberRole.member:
+                await self._remove_from_leads_channel_if_unneeded(
+                    channel.project_id, channel.id, target_user_id
+                )
+
             await self.uow.commit()
             return ChannelMemberRead.model_validate(member)
 
@@ -264,13 +282,13 @@ class ChannelService:
                     detail="Members cannot be manually removed from the leads channel. Membership is automatically managed by project and workspace roles."
                 )
             project = await self._require_project(channel.project_id)
-            
+
             # 1. Verify the requester has base permission to manage members
             await self._require_channel_lead_or_team_lead_or_owner(
                 channel, project, requester_id
             )
 
-            # 2. Prevent subordinates from kicking superiors (Self-removal is exempt)
+            # 2. Prevent subordinates from kicking superiors (self-removal is exempt)
             if requester_id != target_user_id:
                 requester_weight = await self._get_user_hierarchy_weight(
                     project, channel, requester_id
@@ -292,7 +310,78 @@ class ChannelService:
                 raise HTTPException(status_code=404, detail="Member not found.")
 
             await self.uow.channel_members.delete(member)
+
+            # §7.5 — auto-sync: if removing a channel lead, clean up leads
+            # channel membership unless another access path retains it.
+            if member.role == ChannelMemberRole.channel_lead:
+                await self._remove_from_leads_channel_if_unneeded(
+                    channel.project_id, channel.id, target_user_id
+                )
+
             await self.uow.commit()
+
+    # ------------------------------------------------------------------ #
+    # Leads channel auto-sync helpers (§7.2 / §7.3 / §7.5)               #
+    # ------------------------------------------------------------------ #
+
+    async def _add_to_leads_channel_if_needed(
+        self, project_id: str, user_id: str
+    ) -> None:
+        """Add user to the leads channel as a plain member, if not already there."""
+        leads_channel = await self.uow.channels.get_leads_channel(project_id)
+        if leads_channel is None:
+            return
+        existing = await self.uow.channel_members.get_by_channel_and_user(
+            leads_channel.id, user_id
+        )
+        if existing is None:
+            await self.uow.channel_members.create(
+                channel_id=leads_channel.id,
+                user_id=user_id,
+                role=ChannelMemberRole.member,
+            )
+
+    async def _remove_from_leads_channel_if_unneeded(
+        self, project_id: str, excluding_channel_id: str, user_id: str
+    ) -> None:
+        """Remove user from leads channel unless a retained access path exists:
+
+        - A project-level role (team_lead, advisor, viewer) grants standalone
+          leads channel access.
+        - Being a channel_lead in any OTHER discipline channel also retains it.
+
+        ``excluding_channel_id`` is the channel the role change / removal just
+        happened in — it must be skipped when checking other channels.
+        """
+        # Retained via project role?
+        pm = await self.uow.project_members.get_by_project_and_user(
+            project_id, user_id
+        )
+        if pm and pm.role in (
+            ProjectRole.team_lead,
+            ProjectRole.advisor,
+            ProjectRole.viewer,
+        ):
+            return
+
+        # Retained as channel lead elsewhere?
+        channels = await self.uow.channels.list_by_project(project_id)
+        for ch in channels:
+            if ch.id == excluding_channel_id or ch.is_leads_channel:
+                continue
+            cm = await self.uow.channel_members.get_by_channel_and_user(ch.id, user_id)
+            if cm and cm.role == ChannelMemberRole.channel_lead:
+                return
+
+        # No retained path — remove from leads channel.
+        leads_channel = await self.uow.channels.get_leads_channel(project_id)
+        if leads_channel is None:
+            return
+        leads_member = await self.uow.channel_members.get_by_channel_and_user(
+            leads_channel.id, user_id
+        )
+        if leads_member:
+            await self.uow.channel_members.delete(leads_member)
 
     # ------------------------------------------------------------------ #
     # Private helpers                                                      #
@@ -325,7 +414,7 @@ class ChannelService:
             return 1
 
         return 0
-    
+
     async def _require_project(self, project_id: str):
         project = await self.uow.projects.get_by_id(project_id)
         if project is None:
@@ -373,9 +462,8 @@ class ChannelService:
         return project_member
 
     async def _require_leads_channel_access(self, project, user_id: str) -> None:
-        """
-        Enforces that only Workspace Owners, Team Leads, Advisors, 
-        and Viewers can access the leads channel.
+        """§7.1 — Allow: workspace owners, team leads, advisors, viewers, and
+        channel leads of any discipline channel in the project.
         """
         # 1. Workspace owners always have access
         ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
@@ -388,8 +476,21 @@ class ChannelService:
         pm = await self.uow.project_members.get_by_project_and_user(
             project.id, user_id
         )
-        if pm and pm.role in (ProjectRole.team_lead, ProjectRole.advisor, ProjectRole.viewer):
+        if pm and pm.role in (
+            ProjectRole.team_lead,
+            ProjectRole.advisor,
+            ProjectRole.viewer,
+        ):
             return
+
+        # 3. Channel leads of any discipline channel in this project  ← §7.1 addition
+        channels = await self.uow.channels.list_by_project(project.id)
+        for ch in channels:
+            if ch.is_leads_channel:
+                continue
+            cm = await self.uow.channel_members.get_by_channel_and_user(ch.id, user_id)
+            if cm and cm.role == ChannelMemberRole.channel_lead:
+                return
 
         raise HTTPException(
             status_code=403,
