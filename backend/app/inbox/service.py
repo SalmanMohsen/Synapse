@@ -437,6 +437,22 @@ class InboxService:
             role=item.role,
         )
 
+        # §7.4 — auto-sync: accepting a channel_lead invite grants leads channel
+        # membership.  InboxUoW already includes ChannelRepository and
+        # ChannelMemberRepository so no UoW changes are needed.
+        if item.role == ChannelMemberRole.channel_lead and item.project_id:
+            leads_channel = await self.uow.channels.get_leads_channel(item.project_id)
+            if leads_channel:
+                leads_existing = await self.uow.channel_members.get_by_channel_and_user(
+                    leads_channel.id, item.user_id
+                )
+                if leads_existing is None:
+                    await self.uow.channel_members.create(
+                        channel_id=leads_channel.id,
+                        user_id=item.user_id,
+                        role=ChannelMemberRole.member,
+                    )
+
     # ------------------------------------------------------------------ #
     # Private helpers                                                      #
     # ------------------------------------------------------------------ #
