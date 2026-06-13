@@ -14,6 +14,9 @@ from app.inbox.router import (
     workspace_invite_router,
 )
 from app.project.router import projects_router, workspace_projects_router
+from app.message.router import messages_router
+from app.ticket.router import channel_tickets_router, tickets_router
+from app.websocket.router import ws_router
 from app.workspace.router import router as workspace_router
 
 settings = get_settings()
@@ -56,3 +59,13 @@ app.include_router(inbox_router)
 app.include_router(workspace_invite_router)
 app.include_router(project_invite_router)
 app.include_router(channel_invite_router)
+
+# Tickets (channel-scoped create/list + ticket-scoped lifecycle)
+app.include_router(channel_tickets_router)
+app.include_router(tickets_router)
+ 
+# Messages
+app.include_router(messages_router)
+ 
+# WebSocket
+app.include_router(ws_router)
