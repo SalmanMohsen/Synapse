@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 
+import redis.asyncio as aioredis
 from fastapi import HTTPException
 
 from app.auth.models import User
 from app.channel.models import ChannelMemberRole
 from app.project.models import ProjectRole
 from app.ticket.models import TicketStatus
+from app.websocket.manager import publish_to_channel
 
 from .models import Message, MessageType
 from .repository import MessageRepository
@@ -18,8 +20,13 @@ _LOCKED_STATUSES = {TicketStatus.backlog, TicketStatus.routed}
 
 
 class MessageService:
-    def __init__(self, uow: AbstractMessageUnitOfWork) -> None:
+    def __init__(
+        self,
+        uow: AbstractMessageUnitOfWork,
+        redis: aioredis.Redis | None = None,
+    ) -> None:
         self.uow = uow
+        self.redis = redis
 
     # ------------------------------------------------------------------ #
     # Public REST methods                                                  #
@@ -56,14 +63,43 @@ class MessageService:
             # Auto-transition: first human message in a discipline channel
             # moves the ticket from active → in_discussion.
             # Leads channel tickets stay at backlog regardless of messages.
-            if not channel.is_leads_channel and ticket.status == TicketStatus.active:
+            auto_transitioned = (
+                not channel.is_leads_channel
+                and ticket.status == TicketStatus.active
+            )
+            if auto_transitioned:
                 await self.uow.tickets.update(ticket, status=TicketStatus.in_discussion)
-                # WebSocket ticket.status_change published in Step 7
 
             author = await self.uow.users.get_by_id(requester_id)
             await self.uow.commit()
-            # WebSocket message.new published in Step 7
-            return self._to_read(message, author)
+
+            result = self._to_read(message, author)
+
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "message.new",
+                        "ticket_id": ticket_id,
+                        "channel_id": channel.id,
+                        "message": result.model_dump(mode="json"),
+                    },
+                )
+                if auto_transitioned:
+                    await publish_to_channel(
+                        self.redis,
+                        channel.id,
+                        {
+                            "event": "ticket.status_change",
+                            "ticket_id": ticket_id,
+                            "channel_id": channel.id,
+                            "old_status": TicketStatus.active,
+                            "new_status": TicketStatus.in_discussion,
+                        },
+                    )
+
+            return result
 
     async def list_messages(
         self,
@@ -125,8 +161,22 @@ class MessageService:
                 edited_at=datetime.now(timezone.utc),
             )
             await self.uow.commit()
-            # WebSocket message.updated published in Step 7
-            return self._to_read(msg, author)
+
+            result = self._to_read(msg, author)
+
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "message.updated",
+                        "ticket_id": ticket_id,
+                        "channel_id": channel.id,
+                        "message": result.model_dump(mode="json"),
+                    },
+                )
+
+            return result
 
     async def delete_message(
         self,
@@ -183,8 +233,22 @@ class MessageService:
                 msg, deleted_at=datetime.now(timezone.utc)
             )
             await self.uow.commit()
-            # WebSocket message.updated published in Step 7
-            return self._to_read(msg, author)
+
+            result = self._to_read(msg, author)
+
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "message.updated",
+                        "ticket_id": ticket_id,
+                        "channel_id": channel.id,
+                        "message": result.model_dump(mode="json"),
+                    },
+                )
+
+            return result
 
     # ------------------------------------------------------------------ #
     # Internal system-message helper                                       #

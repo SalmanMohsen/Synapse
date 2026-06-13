@@ -1,12 +1,15 @@
+import redis.asyncio as aioredis
 from fastapi import HTTPException
 
 from app.channel.models import ChannelMemberRole
+from app.inbox.schemas import InboxItemRead
 from app.inbox.service import InboxService
 from app.message.models import Message, MessageType
 from app.message.schemas import AuthorRead, MessageListResponse, MessageRead
 from app.message.service import MessageService
 from app.project.models import ProjectRole
 from app.thread_state.schemas import ThreadStateRead
+from app.websocket.manager import publish_to_channel, publish_to_user
 
 from .models import TicketSource, TicketStatus
 from .schemas import (
@@ -42,8 +45,13 @@ def _build_message_read(message: Message, author) -> MessageRead:
 
 
 class TicketService:
-    def __init__(self, uow: AbstractTicketUnitOfWork) -> None:
+    def __init__(
+        self,
+        uow: AbstractTicketUnitOfWork,
+        redis: aioredis.Redis | None = None,
+    ) -> None:
         self.uow = uow
+        self.redis = redis
 
     # ------------------------------------------------------------------ #
     # Ticket CRUD                                                          #
@@ -98,11 +106,13 @@ class TicketService:
             # Notify channel lead(s) so they know a ticket is waiting for
             # activation.  Leads channel creation has no notification because
             # team leads are already watching that channel.
+            # Capture items to publish after commit.
+            lead_notifications: list[tuple[str, object]] = []
             if not channel.is_leads_channel:
                 members = await self.uow.channel_members.list_by_channel(channel_id)
                 for m in members:
                     if m.role == ChannelMemberRole.channel_lead:
-                        await InboxService.create_notification(
+                        item = await InboxService.create_notification(
                             self.uow.inbox_items,
                             user_id=m.user_id,
                             title="New ticket waiting for activation",
@@ -112,9 +122,23 @@ class TicketService:
                             entity_type="ticket",
                             entity_id=ticket.id,
                         )
+                        lead_notifications.append((m.user_id, item))
 
             await self.uow.commit()
-            # WebSocket notification.new published in Step 7
+
+            if self.redis:
+                for user_id, item in lead_notifications:
+                    await publish_to_user(
+                        self.redis,
+                        user_id,
+                        {
+                            "event": "notification.new",
+                            "inbox_item": InboxItemRead.model_validate(item).model_dump(
+                                mode="json"
+                            ),
+                        },
+                    )
+
             return TicketRead.model_validate(ticket)
 
     async def get_ticket(
@@ -233,6 +257,7 @@ class TicketService:
 
             actor_name = await self._get_actor_name(requester_id)
             is_reroute = ticket.status in (TicketStatus.active, TicketStatus.in_discussion)
+            old_channel_id = current_channel.id  # capture before ticket update
 
             if is_reroute:
                 # Remove the now-stale thread state — the Channel Lead of the new
@@ -280,8 +305,9 @@ class TicketService:
             target_members = await self.uow.channel_members.list_by_channel(
                 target_channel.id
             )
+            member_notifications: list[tuple[str, object]] = []
             for member in target_members:
-                await InboxService.create_notification(
+                item = await InboxService.create_notification(
                     self.uow.inbox_items,
                     user_id=member.user_id,
                     title="Ticket routed to your channel",
@@ -291,9 +317,35 @@ class TicketService:
                     entity_type="ticket",
                     entity_id=ticket.id,
                 )
+                member_notifications.append((member.user_id, item))
 
             await self.uow.commit()
-            # WebSocket ticket.routed + notification.new published in Step 7
+
+            if self.redis:
+                # Notify old channel that this ticket has moved away.
+                await publish_to_channel(
+                    self.redis,
+                    old_channel_id,
+                    {
+                        "event": "ticket.routed",
+                        "ticket_id": ticket.id,
+                        "from_channel_id": old_channel_id,
+                        "to_channel_id": target_channel.id,
+                    },
+                )
+                # Personal notifications for target channel members.
+                for user_id, item in member_notifications:
+                    await publish_to_user(
+                        self.redis,
+                        user_id,
+                        {
+                            "event": "notification.new",
+                            "inbox_item": InboxItemRead.model_validate(item).model_dump(
+                                mode="json"
+                            ),
+                        },
+                    )
+
             return TicketRead.model_validate(ticket)
 
     async def activate_ticket(
@@ -347,7 +399,20 @@ class TicketService:
             )
 
             await self.uow.commit()
-            # WebSocket ticket.status_change published in Step 7
+
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "ticket.status_change",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "old_status": TicketStatus.routed,
+                        "new_status": TicketStatus.active,
+                    },
+                )
+
             return TicketRead.model_validate(ticket)
 
     async def close_ticket(
@@ -372,6 +437,7 @@ class TicketService:
                 channel, project, requester_id
             )
 
+            old_status = ticket.status
             ticket = await self.uow.tickets.update(ticket, status=TicketStatus.closed)
 
             actor_name = await self._get_actor_name(requester_id)
@@ -387,7 +453,20 @@ class TicketService:
             )
 
             await self.uow.commit()
-            # WebSocket ticket.status_change published in Step 7
+
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "ticket.status_change",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "old_status": old_status,
+                        "new_status": TicketStatus.closed,
+                    },
+                )
+
             return TicketRead.model_validate(ticket)
 
     async def split_ticket(
@@ -448,6 +527,7 @@ class TicketService:
             for child in child_tickets:
                 await self.uow.tickets.update(child, parent_ticket_id=ticket.id)
 
+            old_status = ticket.status
             ticket = await self.uow.tickets.update(ticket, status=TicketStatus.split)
 
             actor_name = await self._get_actor_name(requester_id)
@@ -467,7 +547,20 @@ class TicketService:
             )
 
             await self.uow.commit()
-            # WebSocket ticket.status_change published in Step 7
+
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "ticket.status_change",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "old_status": old_status,
+                        "new_status": TicketStatus.split,
+                    },
+                )
+
             return TicketRead.model_validate(ticket)
 
     # ------------------------------------------------------------------ #
