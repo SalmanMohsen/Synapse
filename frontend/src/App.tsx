@@ -5,20 +5,24 @@ import { useAuthStore } from '@/features/auth/store/authSlice'
 import { useCurrentUser } from '@/features/auth/hooks/useAuth'
 import { useToastStore } from '@/shared/hooks/useToast'
 import { ToastContainer } from '@/shared/components'
+import { useWebSocket } from '@/shared/hooks/useWebSocket'
 
-// Auth pages (existing)
+// Auth
 import LoginPage from '@/features/auth/pages/LoginPage'
 import RegisterPage from '@/features/auth/pages/RegisterPage'
 import LandingPage from '@/features/auth/pages/LandingPage'
 import SettingsPage from '@/features/auth/pages/SettingsPage'
 
-// New pages
+// Workspace / Project / Channel
 import WorkspacePage from '@/features/workspace/pages/WorkspacePage'
 import WorkspaceSettingsPage from '@/features/workspace/pages/WorkspaceSettingsPage'
 import ProjectPage from '@/features/project/pages/ProjectPage'
 import ProjectSettingsPage from '@/features/project/pages/ProjectSettingsPage'
 import ChannelPage from '@/features/channel/pages/ChannelPage'
 import InboxPage from '@/features/inbox/pages/InboxPage'
+
+// Ticket (Phase 2)
+import TicketDetailPage from '@/features/ticket/pages/TicketDetailPage'
 
 import ProtectedRoute from '@/router/ProtectedRoute'
 import GuestRoute from '@/router/GuestRoute'
@@ -40,6 +44,12 @@ function SessionBootstrap() {
   return null
 }
 
+/** Mounts WebSocket while the user is authenticated. Lives inside the QueryClientProvider. */
+function WebSocketMount() {
+  useWebSocket()
+  return null
+}
+
 function ToastMount() {
   const { toasts, dismiss } = useToastStore()
   return <ToastContainer toasts={toasts} onDismiss={dismiss} />
@@ -50,6 +60,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <SessionBootstrap />
+        <WebSocketMount />
         <ToastMount />
         <Routes>
           {/* Guest-only */}
@@ -65,6 +76,9 @@ export default function App() {
           <Route path="/projects/:pid"              element={<ProtectedRoute><ProjectPage /></ProtectedRoute>} />
           <Route path="/projects/:pid/settings"     element={<ProtectedRoute><ProjectSettingsPage /></ProtectedRoute>} />
           <Route path="/channels/:cid"              element={<ProtectedRoute><ChannelPage /></ProtectedRoute>} />
+
+          {/* Phase 2 — ticket thread view */}
+          <Route path="/tickets/:tid"               element={<ProtectedRoute><TicketDetailPage /></ProtectedRoute>} />
 
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

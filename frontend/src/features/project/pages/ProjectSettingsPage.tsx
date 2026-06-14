@@ -1,12 +1,14 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { AppShell, shellStyles as s } from "@/shared/components/AppShell";
-import { SpinnerPage, EmptyState, Btn, TextField, ConfirmDialog } from "@/shared/components";
+import { SpinnerPage, EmptyState, Btn, TextField, ConfirmDialog, Badge } from "@/shared/components";
 import { useAuthStore } from "@/features/auth/store/authSlice";
 import { useProject, useUpdateProject, useDeleteProject, useProjectMembers } from "../hooks/useProjects";
 import { useWorkspaceMembers } from "@/features/workspace/hooks/useWorkspaces";
+import { api } from "@/shared/lib/axios";
+import { toast } from "@/shared/hooks/useToast";
 
-type Section = "general" | "danger";
+type Section = "general" | "github" | "danger";
 
 export default function ProjectSettingsPage() {
   const { pid } = useParams<{ pid: string }>();
@@ -36,6 +38,7 @@ export default function ProjectSettingsPage() {
 
   const NAV: { id: Section; label: string }[] = [
     { id: "general", label: "General" },
+    { id: "github", label: "GitHub Integration" },
     ...(isWorkspaceOwner ? [{ id: "danger" as Section, label: "Danger zone" }] : []),
   ];
 
@@ -62,6 +65,7 @@ export default function ProjectSettingsPage() {
 
         <div className={s.settingsContent}>
           {active === "general" && <GeneralSection project={project} />}
+          {active === "github" && <GitHubSection projectId={project.id} />}
           {active === "danger" && isWorkspaceOwner && <DangerSection project={project} />}
         </div>
       </div>
@@ -102,6 +106,126 @@ function GeneralSection({ project }: { project: any }) {
           Save changes
         </Btn>
       </div>
+    </div>
+  );
+}
+
+// --- GitHub App Integration Settings Section ---
+function GitHubSection({ projectId }: { projectId: string }) {
+  const [integration, setIntegration] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [linking, setLinking] = useState(false);
+
+  async function fetchIntegration() {
+    setLoading(true);
+    try {
+      const res = await api.get(`/projects/${projectId}/github`);
+      setIntegration(res.data);
+    } catch {
+      setIntegration(null);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    fetchIntegration();
+  }, [projectId]);
+
+  const handleConnect = async () => {
+    setLinking(true);
+    try {
+      // Get the install URL dynamically from the backend
+      const res = await api.get(`/projects/${projectId}/github/install`);
+      const installUrl = res.data.install_url;
+
+      // Handle popup redirection lifecycle securely
+      const popup = window.open(
+        installUrl,
+        "synapse-git-install",
+        "width=700,height=800,scrollbars=yes,resizable=yes"
+      );
+
+      if (!popup) {
+        window.location.href = installUrl;
+        return;
+      }
+
+      const checkInterval = setInterval(() => {
+        if (popup.closed) {
+          clearInterval(checkInterval);
+          setLinking(false);
+          fetchIntegration();
+        }
+      }, 1000);
+    } catch {
+      toast("Failed to initialize connection", "error");
+      setLinking(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (!window.confirm("Disconnect GitHub repository integration?")) return;
+    try {
+      await api.delete(`/projects/${projectId}/github`);
+      toast("Integration disconnected", "success");
+      fetchIntegration();
+    } catch {
+      toast("Failed to remove integration", "error");
+    }
+  };
+
+  if (loading) return <SpinnerPage />;
+
+  return (
+    <div className={s.settingsSection}>
+      <p className={s.settingsSectionTitle}>GitHub Integration</p>
+      {integration ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+          <div
+            style={{
+              padding: "16px",
+              border: "1px solid var(--border-subtle)",
+              borderRadius: "var(--radius-lg)",
+              background: "var(--bg-surface)",
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "center",
+            }}
+          >
+            <div>
+              <p style={{ fontSize: "14px", fontWeight: 500, color: "var(--text-primary)", marginBottom: "4px" }}>
+                {integration.repo_full_name}
+              </p>
+              <span style={{ fontSize: "12px", color: "var(--text-tertiary)" }}>
+                Branch tracking: {integration.default_branch}
+              </span>
+            </div>
+            <Badge variant="success">Connected</Badge>
+          </div>
+          <div>
+            <Btn variant="danger" onClick={handleDisconnect}>
+              Disconnect Repository
+            </Btn>
+          </div>
+        </div>
+      ) : (
+        <div
+          style={{
+            padding: "24px",
+            border: "1px dashed var(--border-default)",
+            borderRadius: "var(--radius-lg)",
+            textAlign: "center",
+          }}
+        >
+          <p style={{ fontSize: "14px", color: "var(--text-secondary)", marginBottom: "16px" }}>
+            Connect this project to a GitHub repository to trigger autonomous agent deployments on Issue/PR callbacks.
+          </p>
+          <Btn variant="primary" onClick={handleConnect} disabled={linking}>
+            {linking ? "Connecting..." : "Install GitHub App"}
+          </Btn>
+        </div>
+      )}
     </div>
   );
 }
