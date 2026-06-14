@@ -149,7 +149,7 @@ class GitIntegrationService:
                 )
             await self.uow.commit()
 
-        return f"{settings.frontend_url}/projects/{project_id}/settings"
+        return None
 
     async def get_integration(self, project_id: str, requester_id: str) -> GitIntegrationRead:
         async with self.uow:

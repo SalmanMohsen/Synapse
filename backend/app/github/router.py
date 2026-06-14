@@ -1,10 +1,11 @@
 # backend/app/github/router.py (new file)
 import json
 from fastapi import APIRouter, Depends, Request, BackgroundTasks, status, HTTPException
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, HTMLResponse
 
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
+from app.auth.router import _success_html
 
 from .dependencies import get_git_integration_service
 from .schemas import GitIntegrationRead, GitInstallUrlResponse
@@ -28,8 +29,8 @@ async def github_app_callback(
     state: str,
     service: GitIntegrationService = Depends(get_git_integration_service),
 ):
-    redirect_url = await service.handle_callback(installation_id, state)
-    return RedirectResponse(url=redirect_url)
+    await service.handle_callback(installation_id, state)
+    return HTMLResponse(_success_html("github_install_success"))
 
 
 @router.get("/api/v1/projects/{project_id}/github", response_model=GitIntegrationRead)
