@@ -1,6 +1,6 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from app.channel.models import Channel
 from .models import Ticket
 
 
@@ -28,6 +28,17 @@ class TicketRepository:
             .order_by(Ticket.created_at.desc())
         )
         return list(result.scalars().all())
+    
+    async def get_by_project_and_issue_number(self, project_id: str, issue_number: int) -> Ticket | None:
+        result = await self.db.execute(
+            select(Ticket)
+            .join(Channel, Channel.id == Ticket.channel_id)
+            .where(
+                Channel.project_id == project_id,
+                Ticket.github_issue_number == issue_number,
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def update(self, ticket: Ticket, **kwargs) -> Ticket:
         for key, value in kwargs.items():

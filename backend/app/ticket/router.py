@@ -63,7 +63,7 @@ async def list_tickets(
 # ------------------------------------------------------------------ #
 
 
-@tickets_router.get("/{ticket_id}", response_model=TicketRead)
+@tickets_router.get("/{ticket_id}", response_model=TicketDetailResponse)
 async def get_ticket(
     ticket_id: str,
     current_user: User = Depends(get_current_user),
