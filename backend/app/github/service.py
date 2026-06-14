@@ -1,0 +1,443 @@
+# backend/app/github/service.py (new file)
+import base64
+import time
+import hmac
+import hashlib
+import uuid
+from datetime import datetime, timezone
+
+import httpx
+import redis.asyncio as aioredis
+from fastapi import HTTPException
+from jose import jwt
+
+from app.project.models import ProjectRole
+from app.ticket.models import TicketStatus, TicketSource, TicketPriority
+from app.inbox.schemas import InboxItemRead
+from app.inbox.service import InboxService
+from app.message.service import MessageService
+from app.websocket.manager import publish_to_user
+from app.config import get_settings
+
+from .models import WebhookEventStatus, GitIntegration
+from .schemas import GitIntegrationRead, GitInstallUrlResponse
+from .uow import AbstractGitIntegrationUnitOfWork
+
+settings = get_settings()
+
+
+class GitIntegrationService:
+    def __init__(
+        self,
+        uow: AbstractGitIntegrationUnitOfWork,
+        redis: aioredis.Redis,
+    ) -> None:
+        self.uow = uow
+        self.redis = redis
+
+    def _generate_github_app_jwt(self) -> str:
+        if not settings.github_app_private_key_base64:
+            raise HTTPException(
+                status_code=500,
+                detail="GitHub App credentials are not configured on the server."
+            )
+        try:
+            private_key_pem = base64.b64decode(settings.github_app_private_key_base64).decode("utf-8")
+        except Exception as e:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to decode the base64-encoded GitHub App private key: {e}"
+            )
+
+        now = int(time.time())
+        payload = {
+            "iat": now - 60,
+            "exp": now + (10 * 60),
+            "iss": settings.github_app_id,
+        }
+        return jwt.encode(payload, private_key_pem, algorithm="RS256")
+
+    async def _get_installation_access_token(self, installation_id: str) -> str:
+        app_jwt = self._generate_github_app_jwt()
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"https://api.github.com/app/installations/{installation_id}/access_tokens",
+                headers={
+                    "Authorization": f"Bearer {app_jwt}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "Synapse-App",
+                },
+                timeout=10,
+            )
+            if resp.status_code != 201:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"Could not generate GitHub App installation token: {resp.text}"
+                )
+            return resp.json()["token"]
+
+    async def get_install_url(self, project_id: str, requester_id: str) -> GitInstallUrlResponse:
+        async with self.uow:
+            project = await self.uow.projects.get_by_id(project_id)
+            if not project:
+                raise HTTPException(status_code=404, detail="Project not found.")
+
+            await self._require_team_lead_or_owner(project, requester_id)
+
+            state_token = str(uuid.uuid4())
+            await self.redis.setex(f"github_install_state:{state_token}", 600, project_id)
+
+            app_slug = settings.github_app_slug
+            url = f"https://github.com/apps/{app_slug}/installations/new?state={state_token}"
+            return GitInstallUrlResponse(install_url=url)
+
+    async def handle_callback(self, installation_id: str, state: str) -> str:
+        project_id = await self.redis.get(f"github_install_state:{state}")
+        if not project_id:
+            raise HTTPException(status_code=400, detail="Invalid or expired installation state.")
+
+        await self.redis.delete(f"github_install_state:{state}")
+
+        installation_token = await self._get_installation_access_token(installation_id)
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                "https://api.github.com/installation/repositories",
+                headers={
+                    "Authorization": f"Bearer {installation_token}",
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "Synapse-App",
+                },
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"Could not retrieve repositories: {resp.text}"
+                )
+
+            repos_json = resp.json()
+            repositories = repos_json.get("repositories", [])
+            if not repositories:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No repositories are configured under this App installation."
+                )
+
+            repo = repositories[0]
+            repo_full_name = repo["full_name"]
+            default_branch = repo.get("default_branch", "main")
+
+        async with self.uow:
+            existing = await self.uow.git_integrations.get_by_project_id(project_id)
+            if existing:
+                await self.uow.git_integrations.update(
+                    existing,
+                    github_app_installation_id=str(installation_id),
+                    repo_full_name=repo_full_name,
+                    default_branch=default_branch,
+                )
+            else:
+                existing_install = await self.uow.git_integrations.get_by_installation_id(str(installation_id))
+                if existing_install:
+                    await self.uow.git_integrations.delete(existing_install)
+
+                await self.uow.git_integrations.create(
+                    project_id=project_id,
+                    github_app_installation_id=str(installation_id),
+                    repo_full_name=repo_full_name,
+                    default_branch=default_branch,
+                )
+            await self.uow.commit()
+
+        return f"{settings.frontend_url}/projects/{project_id}/settings"
+
+    async def get_integration(self, project_id: str, requester_id: str) -> GitIntegrationRead:
+        async with self.uow:
+            project = await self.uow.projects.get_by_id(project_id)
+            if not project:
+                raise HTTPException(status_code=404, detail="Project not found.")
+
+            await self._require_project_visibility(project, requester_id)
+
+            integration = await self.uow.git_integrations.get_by_project_id(project_id)
+            if not integration:
+                raise HTTPException(status_code=404, detail="GitHub integration is not linked.")
+
+            return GitIntegrationRead.model_validate(integration)
+
+    async def delete_integration(self, project_id: str, requester_id: str) -> None:
+        async with self.uow:
+            project = await self.uow.projects.get_by_id(project_id)
+            if not project:
+                raise HTTPException(status_code=404, detail="Project not found.")
+
+            await self._require_team_lead_or_owner(project, requester_id)
+
+            integration = await self.uow.git_integrations.get_by_project_id(project_id)
+            if not integration:
+                raise HTTPException(status_code=404, detail="GitHub integration is not linked.")
+
+            await self.uow.git_integrations.delete(integration)
+            await self.uow.commit()
+
+    # ------------------------------------------------------------------ #
+    # Webhook Management                                                   #
+    # ------------------------------------------------------------------ #
+
+    async def handle_webhook(
+        self,
+        delivery_id: str,
+        event_type: str,
+        action: str,
+        payload: dict,
+        body_bytes: bytes,
+        signature: str | None,
+    ) -> None:
+        if not signature or not signature.startswith("sha256="):
+            raise HTTPException(status_code=401, detail="Invalid signature header.")
+
+        received_hash = signature[7:]
+        expected_hash = hmac.new(
+            settings.github_webhook_secret.encode("utf-8"),
+            body_bytes,
+            hashlib.sha256
+        ).hexdigest()
+
+        if not hmac.compare_digest(received_hash, expected_hash):
+            raise HTTPException(status_code=401, detail="Webhook signature mismatch.")
+
+        async with self.uow:
+            existing_event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
+            if existing_event:
+                return  # Idempotency duplicate exit
+
+            await self.uow.webhook_events.create(
+                delivery_id=delivery_id,
+                event_type=event_type,
+                action=action,
+                payload=payload,
+                status=WebhookEventStatus.pending,
+            )
+            await self.uow.commit()
+
+    async def process_webhook_event(self, delivery_id: str) -> None:
+        async with self.uow:
+            event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
+            if not event:
+                return
+            await self.uow.webhook_events.update(event, status=WebhookEventStatus.processing)
+            await self.uow.commit()
+
+        try:
+            if event.event_type == "issues" and event.action == "opened":
+                await self._handle_issue_opened(event.payload)
+            elif event.event_type == "issues" and event.action == "reopened":
+                await self._handle_issue_reopened(event.payload)
+
+            async with self.uow:
+                event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
+                if event:
+                    await self.uow.webhook_events.update(
+                        event,
+                        status=WebhookEventStatus.processed,
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                await self.uow.commit()
+        except Exception as e:
+            async with self.uow:
+                event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
+                if event:
+                    await self.uow.webhook_events.update(
+                        event,
+                        status=WebhookEventStatus.failed,
+                        error_message=str(e),
+                        processed_at=datetime.now(timezone.utc),
+                    )
+                await self.uow.commit()
+
+    async def _handle_issue_opened(self, payload: dict) -> None:
+        installation_id = str(payload.get("installation", {}).get("id"))
+        if not installation_id:
+            raise ValueError("No installation ID located in webhook payload.")
+
+        async with self.uow:
+            integration = await self.uow.git_integrations.get_by_installation_id(installation_id)
+            if not integration:
+                raise ValueError(f"Integration record not found for installation ID: {installation_id}")
+
+            project_id = integration.project_id
+            leads_channel = await self.uow.channels.get_leads_channel(project_id)
+            if not leads_channel:
+                raise ValueError(f"Leads channel not found for project: {project_id}")
+
+            issue_data = payload.get("issue", {})
+            title = issue_data.get("title", "")
+            description = issue_data.get("body", "")
+            issue_number = issue_data.get("number")
+            github_user_id = str(issue_data.get("user", {}).get("id"))
+            github_author_login = issue_data.get("user", {}).get("login")
+
+            creator_id = None
+            if github_user_id:
+                user = await self.uow.users.get_by_github_id(github_user_id)
+                if user:
+                    creator_id = user.id
+
+            ticket = await self.uow.tickets.create(
+                channel_id=leads_channel.id,
+                title=title,
+                description=description,
+                status=TicketStatus.backlog,
+                source=TicketSource.github,
+                priority=TicketPriority.medium,
+                creator_id=creator_id,
+                github_issue_number=issue_number,
+                github_author_login=github_author_login,
+            )
+
+            await MessageService.create_system_message(
+                self.uow.messages,
+                ticket_id=ticket.id,
+                content=f"Ticket created from GitHub Issue #{issue_number}",
+                metadata={
+                    "event": "ticket_created_from_github",
+                    "github_issue_number": issue_number,
+                    "github_author_login": github_author_login,
+                },
+            )
+
+            leads_members = await self.uow.channel_members.list_by_channel(leads_channel.id)
+            new_notifications = []
+            for member in leads_members:
+                item = await InboxService.create_notification(
+                    self.uow.inbox_items,
+                    user_id=member.user_id,
+                    title=f"New ticket from GitHub: {title[:80]}",
+                    body=f"Issue #{issue_number} opened by {github_author_login}",
+                    project_id=project_id,
+                    channel_id=leads_channel.id,
+                    entity_type="ticket",
+                    entity_id=ticket.id,
+                )
+                new_notifications.append((member.user_id, item))
+
+            await self.uow.commit()
+
+            if self.redis:
+                for user_id, item in new_notifications:
+                    await publish_to_user(
+                        self.redis,
+                        user_id,
+                        {
+                            "event": "notification.new",
+                            "inbox_item": InboxItemRead.model_validate(item).model_dump(mode="json"),
+                        },
+                    )
+
+    async def _handle_issue_reopened(self, payload: dict) -> None:
+        installation_id = str(payload.get("installation", {}).get("id"))
+        if not installation_id:
+            raise ValueError("No installation ID located in webhook payload.")
+
+        async with self.uow:
+            integration = await self.uow.git_integrations.get_by_installation_id(installation_id)
+            if not integration:
+                raise ValueError(f"Integration record not found for installation ID: {installation_id}")
+
+            project_id = integration.project_id
+            issue_data = payload.get("issue", {})
+            issue_number = issue_data.get("number")
+            title = issue_data.get("title", "")
+            github_author_login = issue_data.get("user", {}).get("login")
+
+            ticket = await self.uow.tickets.get_by_project_and_issue_number(project_id, issue_number)
+            if not ticket:
+                raise ValueError(f"Reopened untracked ticket #{issue_number} inside project: {project_id}")
+
+            leads_channel = await self.uow.channels.get_leads_channel(project_id)
+            if not leads_channel:
+                raise ValueError(f"Leads channel not found for project: {project_id}")
+
+            await self.uow.thread_states.delete_by_ticket_id(ticket.id)
+
+            await self.uow.tickets.update(
+                ticket,
+                channel_id=leads_channel.id,
+                status=TicketStatus.backlog,
+            )
+
+            await MessageService.create_system_message(
+                self.uow.messages,
+                ticket_id=ticket.id,
+                content=f"Ticket reopened from GitHub Issue #{issue_number}",
+                metadata={
+                    "event": "ticket_reopened_from_github",
+                    "github_issue_number": issue_number,
+                },
+            )
+
+            leads_members = await self.uow.channel_members.list_by_channel(leads_channel.id)
+            new_notifications = []
+            for member in leads_members:
+                item = await InboxService.create_notification(
+                    self.uow.inbox_items,
+                    user_id=member.user_id,
+                    title=f"Ticket reopened from GitHub: {title[:80]}",
+                    body=f"Issue #{issue_number} was reopened on GitHub",
+                    project_id=project_id,
+                    channel_id=leads_channel.id,
+                    entity_type="ticket",
+                    entity_id=ticket.id,
+                )
+                new_notifications.append((member.user_id, item))
+
+            await self.uow.commit()
+
+            if self.redis:
+                for user_id, item in new_notifications:
+                    await publish_to_user(
+                        self.redis,
+                        user_id,
+                        {
+                            "event": "notification.new",
+                            "inbox_item": InboxItemRead.model_validate(item).model_dump(mode="json"),
+                        },
+                    )
+
+    # ------------------------------------------------------------------ #
+    # Access Rules Helpers                                                 #
+    # ------------------------------------------------------------------ #
+
+    async def _require_team_lead_or_owner(self, project, requester_id: str) -> None:
+        ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
+            project.workspace_id, requester_id
+        )
+        if ws_member and ws_member.is_owner:
+            return
+
+        pm = await self.uow.project_members.get_by_project_and_user(
+            project.id, requester_id
+        )
+        if pm and pm.role == ProjectRole.team_lead:
+            return
+
+        raise HTTPException(
+            status_code=403,
+            detail="Only Team Leads or workspace owners can manage this integration."
+        )
+
+    async def _require_project_visibility(self, project, requester_id: str) -> None:
+        ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
+            project.workspace_id, requester_id
+        )
+        if ws_member and ws_member.is_owner:
+            return
+
+        pm = await self.uow.project_members.get_by_project_and_user(
+            project.id, requester_id
+        )
+        if pm is None:
+            raise HTTPException(
+                status_code=403,
+                detail="You must be a member of this project to inspect integration details."
+            )
