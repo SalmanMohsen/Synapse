@@ -126,7 +126,9 @@ class TicketService:
 
             await self.uow.commit()
 
+            # Broadcast the new ticket event to the entire channel
             if self.redis:
+                # Personal notification alerts
                 for user_id, item in lead_notifications:
                     await publish_to_user(
                         self.redis,
@@ -138,6 +140,19 @@ class TicketService:
                             ),
                         },
                     )
+                # Channel-wide real-time ticket sync alert
+                await publish_to_channel(
+                    self.redis,
+                    channel_id,
+                    {
+                        "event": "ticket.new",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel_id,
+                        "ticket": TicketRead.model_validate(ticket).model_dump(
+                            mode="json"
+                        ),
+                    },
+                )
 
             return TicketRead.model_validate(ticket)
 

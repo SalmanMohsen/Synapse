@@ -311,7 +311,14 @@ class ProjectService:
                             "Assign another Team Lead first."
                         ),
                     )
-
+            channels = await self.uow.channels.list_by_project(project_id)
+            for channel in channels:
+                cm = await self.uow.channel_members.get_by_channel_and_user(
+                    channel.id, target_user_id
+                )
+                if cm is not None:
+                    await self.uow.channel_members.delete(cm)
+                    
             await self.uow.project_members.delete(member)
             await self.uow.commit()
 

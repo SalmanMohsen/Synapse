@@ -1,3 +1,5 @@
+from enum import member
+
 from fastapi import HTTPException
 from app.auth.schemas import UserRead
 from app.project.models import ProjectRole
@@ -308,12 +310,14 @@ class ChannelService:
             )
             if member is None:
                 raise HTTPException(status_code=404, detail="Member not found.")
+            
+            old_role = member.role
 
             await self.uow.channel_members.delete(member)
 
             # §7.5 — auto-sync: if removing a channel lead, clean up leads
             # channel membership unless another access path retains it.
-            if member.role == ChannelMemberRole.channel_lead:
+            if old_role == ChannelMemberRole.channel_lead:
                 await self._remove_from_leads_channel_if_unneeded(
                     channel.project_id, channel.id, target_user_id
                 )
