@@ -31,6 +31,7 @@ class Settings(BaseSettings):
 
     # GitHub App credentials (repository integration)
     github_app_id: str = ""
+    github_app_slug: str = "synapse"  # Added slug field for installation URLs
     github_app_private_key_base64: str = ""  # base64-encoded PEM private key
     github_webhook_secret: str = ""
 
