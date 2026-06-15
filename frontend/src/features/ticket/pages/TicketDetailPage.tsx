@@ -4,19 +4,28 @@ import {
 import { useParams, Link } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import { AppShell } from '@/shared/components/AppShell'
-import { SpinnerPage, EmptyState, Btn, Modal, SelectField } from '@/shared/components' // <-- Import Modal & SelectField
+import { SpinnerPage, EmptyState, Btn, Modal, SelectField, TextField } from '@/shared/components' // <-- Import TextField
 import { useAuthStore } from '@/features/auth/store/authSlice'
-import { useChannel, useChannelMembers, useChannels } from '@/features/channel/hooks/useChannels' // <-- Import useChannels
+import { useChannel, useChannelMembers, useChannels } from '@/features/channel/hooks/useChannels'
 import { useProjectMembers } from '@/features/project/hooks/useProjects'
 import {
-  useTicketDetail, useActivateTicket, useDeactivateTicket, useRouteTicket, // <-- Import useRouteTicket
+  useTicketDetail, useActivateTicket, useDeactivateTicket, useRouteTicket, useSplitTicket,
 } from '../hooks/useTickets'
 import { useMessages, useSendMessage, useEditMessage, useDeleteMessage } from '@/features/message/hooks/useMessages'
+import { ticketApi } from '../api/ticketApi'
 import type { TicketRead, TicketStatus, TicketPriority } from '../types/ticket.types'
 import { STATUS_LABELS, PRIORITY_LABELS } from '../types/ticket.types'
 import type { MessageRead } from '@/features/message/types/message.types'
 import type { MessageListResponse } from '@/features/message/types/message.types'
+import { toast } from '@/shared/hooks/useToast'
 import styles from './TicketDetailPage.module.css'
+
+// ── Types ──
+interface ChildDraft {
+  title: string
+  channelId: string
+  priority: TicketPriority
+}
 
 // ── Helpers ──
 function timeAgo(iso: string): string {
@@ -29,7 +38,7 @@ function timeAgo(iso: string): string {
 
 const STATUS_CLASS: Record<TicketStatus, string> = {
   backlog:           styles.statusBacklog,
-  routed:            styles.statusBacklog, // styled same as backlog
+  routed:            styles.statusBacklog,
   active:            styles.statusActive,
   in_discussion:     styles.statusDiscussion,
   consensus_reached: styles.statusConsensus,
@@ -38,6 +47,7 @@ const STATUS_CLASS: Record<TicketStatus, string> = {
   in_review:         styles.statusInReview,
   merged:            styles.statusMerged,
   closed:            styles.statusClosed,
+  split:             styles.statusClosed,
 }
 
 function StatusBadge({ status }: { status: TicketStatus }) {
@@ -101,7 +111,7 @@ function TicketView({
   const { data: channel } = useChannel(ticket.channel_id)
   const { data: channelMembers } = useChannelMembers(ticket.channel_id)
   const { data: projectMembers } = useProjectMembers(channel?.project_id ?? '')
-  const { data: channels } = useChannels(channel?.project_id ?? '') // <-- Fetch project channels
+  const { data: channels } = useChannels(channel?.project_id ?? '')
   const user = useAuthStore((s) => s.user)
 
   const myProjectMember = projectMembers?.find((m) => m.user_id === user?.id)
@@ -110,13 +120,36 @@ function TicketView({
   const myChannelMember = channelMembers?.find((m) => m.user_id === user?.id)
   const isChannelLead = myChannelMember?.role === 'channel_lead'
 
-  const isLocked = ['backlog', 'routed'].includes(ticket.status) && !channel?.is_leads_channel
+  const isLocked = ['backlog', 'routed', 'split', 'closed'].includes(ticket.status) && !channel?.is_leads_channel
 
   const activate   = useActivateTicket(ticket.id, ticket.channel_id)
   const route      = useRouteTicket(ticket.id)
+  const split      = useSplitTicket(ticket.id, ticket.channel_id)
 
   const [showRoute, setShowRoute] = useState(false)
   const [selectedChannelId, setSelectedChannelId] = useState('')
+
+  const [showSplit, setShowSplit] = useState(false)
+  const [isSubmittingSplit, setIsSubmittingSplit] = useState(false)
+  
+  // Dynamic list of child tickets to create on the fly. Initializes with 2 blank drafts (as 2 is the minimum split count)
+  const [childDrafts, setChildDrafts] = useState<ChildDraft[]>([
+    { title: '', channelId: '', priority: ticket.priority },
+    { title: '', channelId: '', priority: ticket.priority },
+  ])
+
+  const disciplineChannels = channels?.filter((c) => !c.is_leads_channel) ?? []
+
+  // Pre-fill target channels once loaded
+  useEffect(() => {
+    if (showSplit && disciplineChannels.length > 0 && childDrafts[0].channelId === '') {
+      const defaultChannel = disciplineChannels[0].id
+      setChildDrafts([
+        { title: '', channelId: defaultChannel, priority: ticket.priority },
+        { title: '', channelId: defaultChannel, priority: ticket.priority },
+      ])
+    }
+  }, [showSplit, disciplineChannels, ticket.priority])
 
   const handleRouteSave = async () => {
     if (!selectedChannelId) return
@@ -124,8 +157,54 @@ function TicketView({
     setShowRoute(false)
   }
 
-  // Only allow routing to discipline channels (exclude the leads channel)
-  const disciplineChannels = channels?.filter((c) => !c.is_leads_channel) ?? []
+  const handleAddChildDraft = () => {
+    setChildDrafts([
+      ...childDrafts,
+      { title: '', channelId: disciplineChannels[0]?.id ?? '', priority: ticket.priority }
+    ])
+  }
+
+  const handleRemoveChildDraft = (index: number) => {
+    if (childDrafts.length <= 2) return // Keep minimum of 2
+    setChildDrafts(childDrafts.filter((_, i) => i !== index))
+  }
+
+  const handleChildDraftChange = (index: number, field: keyof ChildDraft, value: string) => {
+    setChildDrafts(
+      childDrafts.map((draft, i) => (i === index ? { ...draft, [field]: value } : draft))
+    )
+  }
+
+  // Orchestrated Split: Creates the child tickets dynamically first, then calls the split endpoint
+  const handleSplitSave = async () => {
+    if (childDrafts.some((d) => !d.title.trim())) {
+      toast('Please provide a title for all child tickets', 'error')
+      return
+    }
+
+    setIsSubmittingSplit(true)
+    try {
+      const createdIds: string[] = []
+
+      // 1. Create the child tickets in their target channels
+      for (const draft of childDrafts) {
+        const res = await ticketApi.create(draft.channelId, {
+          title: draft.title.trim(),
+          description: `Created during split of parent ticket: "${ticket.title}".`,
+          priority: draft.priority,
+        })
+        createdIds.push(res.id)
+      }
+
+      // 2. Fire the split operation with the collected IDs
+      await split.mutateAsync(createdIds)
+      setShowSplit(false)
+    } catch {
+      toast('Failed to complete split operations', 'error')
+    } finally {
+      setIsSubmittingSplit(false)
+    }
+  }
 
   return (
     <AppShell
@@ -193,7 +272,7 @@ function TicketView({
               <div className={styles.sideSection}>
                 <p className={styles.sideSectionTitle}>Actions</p>
                 <div className={styles.actionGroup}>
-                  {/* Route Button — only shown to Team Leads on backlog/routed tickets */}
+                  {/* Route Button */}
                   {['backlog', 'routed'].includes(ticket.status) && isTeamLead && (
                     <button
                       className={`${styles.actionBtn} ${styles.actionBtnPrimary}`}
@@ -206,7 +285,23 @@ function TicketView({
                     </button>
                   )}
 
-                  {/* Activate Button — only shown to Channel Leads on routed tickets */}
+                  {/* Split Button — Available for backlog, active, or in_discussion statuses */}
+                  {['backlog', 'active', 'in_discussion'].includes(ticket.status) && isTeamLead && (
+                    <button
+                      className={`${styles.actionBtn} ${styles.actionBtnPrimary}`}
+                      onClick={() => {
+                        setChildDrafts([
+                          { title: '', channelId: disciplineChannels[0]?.id ?? '', priority: ticket.priority },
+                          { title: '', channelId: disciplineChannels[0]?.id ?? '', priority: ticket.priority },
+                        ])
+                        setShowSplit(true)
+                      }}
+                    >
+                      Split ticket
+                    </button>
+                  )}
+
+                  {/* Activate Button */}
                   {ticket.status === 'routed' && isChannelLead && (
                     <button
                       className={`${styles.actionBtn} ${styles.actionBtnPrimary}`}
@@ -256,6 +351,103 @@ function TicketView({
               label: c.name,
             }))}
           />
+        </Modal>
+      )}
+
+      {/* Orchestrated Split Modal */}
+      {showSplit && (
+        <Modal
+          title="Split Ticket — Define Child Tickets"
+          onClose={() => setShowSplit(false)}
+          size="lg"
+          footer={
+            <>
+              <Btn variant="ghost" onClick={() => setShowSplit(false)}>Cancel</Btn>
+              <Btn 
+                variant="primary" 
+                onClick={handleSplitSave} 
+                loading={isSubmittingSplit}
+              >
+                Create & Split
+              </Btn>
+            </>
+          }
+        >
+          <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5, marginBottom: 16 }}>
+            Define the child tickets to delegate your tasks. Clicking "Create & Split" will create these tickets inside their respective channels and close this parent ticket.
+          </p>
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16, maxHeight: 320, overflowY: 'auto', paddingRight: 6 }}>
+            {childDrafts.map((draft, idx) => (
+              <div 
+                key={idx} 
+                style={{ 
+                  display: 'grid', 
+                  gridTemplateColumns: '2fr 1fr 1fr 40px', 
+                  gap: 10, 
+                  alignItems: 'end',
+                  paddingBottom: 16,
+                  borderBottom: '1px solid var(--border-subtle)'
+                }}
+              >
+                <TextField
+                  label={`Child #${idx + 1} Title`}
+                  value={draft.title}
+                  onChange={(v) => handleChildDraftChange(idx, 'title', v)}
+                  placeholder="e.g. Implement backend authorization hooks"
+                />
+                
+                <SelectField
+                  label="Target Channel"
+                  value={draft.channelId}
+                  onChange={(v) => handleChildDraftChange(idx, 'channelId', v)}
+                  options={disciplineChannels.map((c) => ({
+                    value: c.id,
+                    label: c.name,
+                  }))}
+                />
+
+                <SelectField
+                  label="Priority"
+                  value={draft.priority}
+                  onChange={(v) => handleChildDraftChange(idx, 'priority', v)}
+                  options={[
+                    { value: 'low', label: 'Low' },
+                    { value: 'medium', label: 'Medium' },
+                    { value: 'high', label: 'High' },
+                    { value: 'critical', label: 'Critical' },
+                  ]}
+                />
+
+                <button
+                  type="button"
+                  onClick={() => handleRemoveChildDraft(idx)}
+                  disabled={childDrafts.length <= 2}
+                  style={{
+                    height: 38,
+                    border: '1px solid var(--border-subtle)',
+                    background: 'transparent',
+                    color: 'var(--error)',
+                    borderRadius: 'var(--radius-md)',
+                    cursor: childDrafts.length <= 2 ? 'not-allowed' : 'pointer',
+                    opacity: childDrafts.length <= 2 ? 0.35 : 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center'
+                  }}
+                  title="Remove child ticket"
+                >
+                  ✕
+                </button>
+              </div>
+            ))}
+          </div>
+
+          <div style={{ marginTop: 14 }}>
+            <Btn variant="ghost" onClick={handleAddChildDraft}>
+              + Add another child ticket
+            </Btn>
+          </div>
         </Modal>
       )}
     </AppShell>
@@ -360,7 +552,7 @@ function ThreadPanel({ ticketId, isLocked }: { ticketId: string; isLocked: boole
             value={draft}
             onChange={(e) => handleTextareaChange(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder={isLocked ? "This thread is locked until activated..." : "Write a message…"}
+            placeholder={isLocked ? "This thread is locked..." : "Write a message…"}
             rows={1}
             disabled={isLocked}
           />
@@ -374,7 +566,7 @@ function ThreadPanel({ ticketId, isLocked }: { ticketId: string; isLocked: boole
           </button>
         </div>
         <p className={styles.inputHint}>
-          {isLocked ? "Only the Channel Lead can activate and unlock this thread." : "⌘ + Enter to send"}
+          {isLocked ? "This thread is closed." : "⌘ + Enter to send"}
         </p>
       </div>
     </div>
