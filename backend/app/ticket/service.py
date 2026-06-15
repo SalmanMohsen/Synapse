@@ -500,7 +500,7 @@ class TicketService:
 
             await self._require_team_lead_or_owner(project, requester_id)
 
-            _SPLITTABLE_STATUSES = {TicketStatus.active, TicketStatus.in_discussion}
+            _SPLITTABLE_STATUSES = {TicketStatus.backlog,TicketStatus.active, TicketStatus.in_discussion}
             if ticket.status not in _SPLITTABLE_STATUSES:
                 raise HTTPException(
                     status_code=400,
