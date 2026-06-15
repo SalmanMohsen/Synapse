@@ -16,8 +16,9 @@ from app.ticket.models import TicketStatus, TicketSource, TicketPriority
 from app.inbox.schemas import InboxItemRead
 from app.inbox.service import InboxService
 from app.message.service import MessageService
-from app.websocket.manager import publish_to_user
+from app.websocket.manager import publish_to_user, publish_to_channel
 from app.config import get_settings
+from app.ticket.schemas import TicketRead
 
 from .models import WebhookEventStatus, GitIntegration
 from .schemas import GitIntegrationRead, GitInstallUrlResponse
@@ -333,6 +334,18 @@ class GitIntegrationService:
                             "inbox_item": InboxItemRead.model_validate(item).model_dump(mode="json"),
                         },
                     )
+            await publish_to_channel(
+                    self.redis,
+                    leads_channel.id,
+                    {
+                        "event": "ticket.new",
+                        "ticket_id": ticket.id,
+                        "channel_id": leads_channel.id,
+                        "ticket": TicketRead.model_validate(ticket).model_dump(
+                            mode="json"
+                        ),
+                    },
+                )
 
     async def _handle_issue_reopened(self, payload: dict) -> None:
         installation_id = str(payload.get("installation", {}).get("id"))
@@ -403,6 +416,17 @@ class GitIntegrationService:
                             "inbox_item": InboxItemRead.model_validate(item).model_dump(mode="json"),
                         },
                     )
+            await publish_to_channel(
+                    self.redis,
+                    leads_channel.id,
+                    {
+                        "event": "ticket.status_change",
+                        "ticket_id": ticket.id,
+                        "channel_id": leads_channel.id,
+                        "old_status": TicketStatus.closed,
+                        "new_status": TicketStatus.backlog,
+                    },
+                )
 
     # ------------------------------------------------------------------ #
     # Access Rules Helpers                                                 #
