@@ -12,6 +12,7 @@ export type TicketStatus =
   | 'in_review'
   | 'merged'
   | 'closed'
+  | 'split'
 
 export type TicketPriority = 'low' | 'medium' | 'high' | 'critical'
 export type TicketSource = 'manual' | 'github_issue'
@@ -83,6 +84,7 @@ export const STATUS_LABELS: Record<TicketStatus, string> = {
   in_review:         'In review',
   merged:            'Merged',
   closed:            'Closed',
+  split:             'Split'
 }
 
 export const PRIORITY_LABELS: Record<TicketPriority, string> = {

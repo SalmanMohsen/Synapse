@@ -79,6 +79,21 @@ export const useRouteTicket = (ticketId: string) => {
   })
 }
 
+export const useSplitTicket = (ticketId: string, channelId: string) => {
+  const qc = useQueryClient()
+  return useMutation({
+    // Receives an array of child ticket IDs
+    mutationFn: (childIds: string[]) => ticketApi.split(ticketId, { child_ticket_ids: childIds }),
+    onSuccess: (ticket) => {
+      _patchTicketCache(qc, ticketId, channelId, ticket)
+      // Invalidate the message thread so the automated split system message displays immediately
+      qc.invalidateQueries({ queryKey: ['messages', ticketId] })
+      toast('Ticket split completed successfully', 'success')
+    },
+    onError: () => toast('Failed to execute ticket split', 'error'),
+  })
+}
+
 // ── Internal helper ───────────────────────────────────────────────────────────
 
 function _patchTicketCache(
