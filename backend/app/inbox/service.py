@@ -1,10 +1,13 @@
+# backend/app/inbox/service.py
 from datetime import datetime, timedelta, timezone
 
+import redis.asyncio as aioredis
 from fastapi import HTTPException
 
 from app.channel.models import ChannelMemberRole
 from app.project.models import ProjectRole
 from app.workspace.models import WorkspaceMember
+from app.websocket.manager import publish_to_user
 
 from .models import InboxItem, InboxItemStatus, InboxItemType
 from .schemas import InboxItemRead
@@ -22,8 +25,13 @@ _CHANNEL_INELIGIBLE_ROLES = {ProjectRole.advisor, ProjectRole.viewer}
 
 
 class InboxService:
-    def __init__(self, uow: AbstractInboxUnitOfWork) -> None:
+    def __init__(
+        self,
+        uow: AbstractInboxUnitOfWork,
+        redis: aioredis.Redis | None = None,
+    ) -> None:
         self.uow = uow
+        self.redis = redis
 
     # ------------------------------------------------------------------ #
     # Read                                                                 #
@@ -95,6 +103,17 @@ class InboxService:
                 expires_at=self._expiry(InboxItemType.workspace_invite),
             )
             await self.uow.commit()
+
+            if self.redis:
+                await publish_to_user(
+                    self.redis,
+                    target_user_id,
+                    {
+                        "event": "notification.new",
+                        "inbox_item": InboxItemRead.model_validate(item).model_dump(mode="json"),
+                    },
+                )
+
             return InboxItemRead.model_validate(item)
 
     async def send_project_invite(
@@ -152,6 +171,17 @@ class InboxService:
                 expires_at=self._expiry(InboxItemType.project_invite),
             )
             await self.uow.commit()
+
+            if self.redis:
+                await publish_to_user(
+                    self.redis,
+                    target_user_id,
+                    {
+                        "event": "notification.new",
+                        "inbox_item": InboxItemRead.model_validate(item).model_dump(mode="json"),
+                    },
+                )
+
             return InboxItemRead.model_validate(item)
 
     async def send_channel_invite(
@@ -232,6 +262,17 @@ class InboxService:
                 expires_at=self._expiry(InboxItemType.channel_invite),
             )
             await self.uow.commit()
+
+            if self.redis:
+                await publish_to_user(
+                    self.redis,
+                    target_user_id,
+                    {
+                        "event": "notification.new",
+                        "inbox_item": InboxItemRead.model_validate(item).model_dump(mode="json"),
+                    },
+                )
+
             return InboxItemRead.model_validate(item)
 
     # ------------------------------------------------------------------ #
@@ -303,14 +344,6 @@ class InboxService:
         Lightweight static helper so other services (project, workspace, etc.)
         can insert a notification row inside their own UoW transaction without
         instantiating InboxService. Caller is responsible for commit.
-
-        Usage (inside project service after creating project):
-            await InboxService.create_notification(
-                self.uow.inbox_items,
-                user_id=owner.user_id,
-                title="New project created: ...",
-                ...
-            )
         """
         return await inbox_repo.create(
             user_id=user_id,
@@ -438,8 +471,7 @@ class InboxService:
         )
 
         # §7.4 — auto-sync: accepting a channel_lead invite grants leads channel
-        # membership.  InboxUoW already includes ChannelRepository and
-        # ChannelMemberRepository so no UoW changes are needed.
+        # membership.
         if item.role == ChannelMemberRole.channel_lead and item.project_id:
             leads_channel = await self.uow.channels.get_leads_channel(item.project_id)
             if leads_channel:
