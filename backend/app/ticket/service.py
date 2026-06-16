@@ -204,11 +204,6 @@ class TicketService:
     async def update_ticket(
         self, ticket_id: str, requester_id: str, data: TicketUpdate
     ) -> TicketRead:
-        """Update mutable metadata: title, description, priority.
-
-        Lifecycle transitions (route, activate, close, split) are separate
-        service methods below.
-        """
         async with self.uow:
             ticket = await self._require_ticket(ticket_id)
             channel = await self._require_channel(ticket.channel_id)
@@ -220,11 +215,29 @@ class TicketService:
                 ticket = await self.uow.tickets.update(ticket, **updates)
 
             await self.uow.commit()
-            return TicketRead.model_validate(ticket)
+            
+            result = TicketRead.model_validate(ticket)
+            
+            # Broadcast metadata update in real-time
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "ticket.updated",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "ticket": result.model_dump(mode="json"),
+                    },
+                )
+            
+            return result
 
     # ------------------------------------------------------------------ #
     # Ticket lifecycle                                                     #
     # ------------------------------------------------------------------ #
+
+    # backend/app/ticket/service.py
 
     async def route_ticket(
         self, ticket_id: str, requester_id: str, data: TicketRouteRequest
@@ -275,11 +288,10 @@ class TicketService:
             old_channel_id = current_channel.id  # capture before ticket update
 
             if is_reroute:
-                # Remove the now-stale thread state — the Channel Lead of the new
-                # channel will create a fresh one when they activate the ticket.
+                # Remove the now-stale thread state
                 await self.uow.thread_states.delete_by_ticket_id(ticket.id)
 
-                await MessageService.create_system_message(
+                sys_msg = await MessageService.create_system_message(
                     self.uow.messages,
                     ticket_id=ticket.id,
                     content=(
@@ -297,7 +309,7 @@ class TicketService:
                     },
                 )
             else:
-                await MessageService.create_system_message(
+                sys_msg = await MessageService.create_system_message(
                     self.uow.messages,
                     ticket_id=ticket.id,
                     content=f"Ticket routed to {target_channel.name}.",
@@ -316,7 +328,7 @@ class TicketService:
                 status=TicketStatus.routed,
             )
 
-            # Notify every member of the target channel.
+            # Notify members of target channel
             target_members = await self.uow.channel_members.list_by_channel(
                 target_channel.id
             )
@@ -337,7 +349,18 @@ class TicketService:
             await self.uow.commit()
 
             if self.redis:
-                # Notify old channel that this ticket has moved away.
+                # Broadcast the system message to the thread in real-time
+                await publish_to_channel(
+                    self.redis,
+                    old_channel_id,
+                    {
+                        "event": "message.new",
+                        "ticket_id": ticket.id,
+                        "channel_id": old_channel_id,
+                        "message": _build_message_read(sys_msg, None).model_dump(mode="json"),
+                    },
+                )
+                # Notify old channel that this ticket has moved away
                 await publish_to_channel(
                     self.redis,
                     old_channel_id,
@@ -348,7 +371,7 @@ class TicketService:
                         "to_channel_id": target_channel.id,
                     },
                 )
-                # Personal notifications for target channel members.
+                # Personal notifications for target channel members
                 for user_id, item in member_notifications:
                     await publish_to_user(
                         self.redis,
@@ -384,8 +407,6 @@ class TicketService:
                     ),
                 )
 
-            # Activation is exclusively a Channel Lead privilege — no fallback
-            # to Team Lead.  If no lead is assigned, the ticket waits.
             is_lead = await self.uow.channel_members.is_channel_lead(
                 channel.id, requester_id
             )
@@ -395,14 +416,13 @@ class TicketService:
                     detail="Only the Channel Lead can activate tickets.",
                 )
 
-            # Create a blank ThreadState: all Observer Agent fields remain null
-            # until Phase 3 wires up the Observer Agent.
+            # Create a blank ThreadState
             await self.uow.thread_states.create(ticket_id=ticket.id)
 
             ticket = await self.uow.tickets.update(ticket, status=TicketStatus.active)
 
             actor_name = await self._get_actor_name(requester_id)
-            await MessageService.create_system_message(
+            sys_msg = await MessageService.create_system_message(
                 self.uow.messages,
                 ticket_id=ticket.id,
                 content=f"Ticket activated by {actor_name}.",
@@ -416,6 +436,7 @@ class TicketService:
             await self.uow.commit()
 
             if self.redis:
+                # 1. Publish status update event (for status badges)
                 await publish_to_channel(
                     self.redis,
                     channel.id,
@@ -427,13 +448,34 @@ class TicketService:
                         "new_status": TicketStatus.active,
                     },
                 )
+                # 2. Publish full ticket update event (for detail views / cards)
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "ticket.updated",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "ticket": TicketRead.model_validate(ticket).model_dump(mode="json"),
+                    },
+                )
+                # 3. Publish system message in real-time (for chat log updates)
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "message.new",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "message": _build_message_read(sys_msg, None).model_dump(mode="json"),
+                    },
+                )
 
             return TicketRead.model_validate(ticket)
 
     async def close_ticket(
         self, ticket_id: str, requester_id: str
     ) -> TicketRead:
-        """Manual close — discussion-only path (no active agent run)."""
         async with self.uow:
             ticket = await self._require_ticket(ticket_id)
             channel = await self._require_channel(ticket.channel_id)
@@ -456,7 +498,7 @@ class TicketService:
             ticket = await self.uow.tickets.update(ticket, status=TicketStatus.closed)
 
             actor_name = await self._get_actor_name(requester_id)
-            await MessageService.create_system_message(
+            sys_msg = await MessageService.create_system_message(
                 self.uow.messages,
                 ticket_id=ticket.id,
                 content=f"Ticket closed by {actor_name}.",
@@ -470,6 +512,7 @@ class TicketService:
             await self.uow.commit()
 
             if self.redis:
+                # 1. Publish status update event
                 await publish_to_channel(
                     self.redis,
                     channel.id,
@@ -481,18 +524,23 @@ class TicketService:
                         "new_status": TicketStatus.closed,
                     },
                 )
+                # 2. Publish system message in real-time
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "message.new",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "message": _build_message_read(sys_msg, None).model_dump(mode="json"),
+                    },
+                )
 
             return TicketRead.model_validate(ticket)
 
     async def split_ticket(
         self, ticket_id: str, requester_id: str, data: TicketSplitRequest
     ) -> TicketRead:
-        """Mark a ticket as split and link its child tickets.
-
-        The parent becomes terminal (status=split).  Child tickets are
-        pre-existing tickets in the same project that have not been
-        previously assigned to a parent.
-        """
         async with self.uow:
             ticket = await self._require_ticket(ticket_id)
             channel = await self._require_channel(ticket.channel_id)
@@ -500,14 +548,14 @@ class TicketService:
 
             await self._require_team_lead_or_owner(project, requester_id)
 
-            _SPLITTABLE_STATUSES = {TicketStatus.backlog,TicketStatus.active, TicketStatus.in_discussion}
+            _SPLITTABLE_STATUSES = {TicketStatus.backlog, TicketStatus.active, TicketStatus.in_discussion}
             if ticket.status not in _SPLITTABLE_STATUSES:
                 raise HTTPException(
                     status_code=400,
                     detail="Only active or in_discussion tickets can be split.",
                 )
 
-            # Validate all child tickets before mutating anything.
+            # Validate child tickets
             child_tickets = []
             for child_id in data.child_ticket_ids:
                 if child_id == ticket.id:
@@ -546,7 +594,7 @@ class TicketService:
             ticket = await self.uow.tickets.update(ticket, status=TicketStatus.split)
 
             actor_name = await self._get_actor_name(requester_id)
-            await MessageService.create_system_message(
+            sys_msg = await MessageService.create_system_message(
                 self.uow.messages,
                 ticket_id=ticket.id,
                 content=(
@@ -564,6 +612,7 @@ class TicketService:
             await self.uow.commit()
 
             if self.redis:
+                # 1. Publish status update event
                 await publish_to_channel(
                     self.redis,
                     channel.id,
@@ -573,6 +622,17 @@ class TicketService:
                         "channel_id": channel.id,
                         "old_status": old_status,
                         "new_status": TicketStatus.split,
+                    },
+                )
+                # 2. Publish system message in real-time
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "message.new",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "message": _build_message_read(sys_msg, None).model_dump(mode="json"),
                     },
                 )
 

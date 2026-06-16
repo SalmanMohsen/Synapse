@@ -159,27 +159,39 @@ class ProjectService:
             project = await self._require_project(project_id)
             await self._require_project_visibility(project, requester_id)
             
-            # Use the new joined query
+            # 1. Fetch explicit project members
             rows = await self.uow.project_members.list_by_project_with_users(project_id)
-            return [
+            project_members_list = [
                 ProjectMemberRead(
                     **ProjectMemberRead.model_validate(m).model_dump(exclude={"user"}),
                     user=UserRead.model_validate(u)
                 )
                 for m, u in rows
             ]
+            
+            # Track user IDs that are already explicitly in the project
+            existing_user_ids = {m.user_id for m in project_members_list}
+
+            # 2. Append workspace owners virtually so they are visible as members
+            ws_rows = await self.uow.workspace_members.list_by_workspace_with_users(project.workspace_id)
+            for wm, u in ws_rows:
+                if wm.is_owner and u.id not in existing_user_ids:
+                    project_members_list.append(
+                        ProjectMemberRead(
+                            id=f"owner-{wm.id}",
+                            project_id=project_id,
+                            user_id=u.id,
+                            role=ProjectRole.team_lead,  # Represent their implicit admin access as Team Lead
+                            joined_at=wm.joined_at,
+                            user=UserRead.model_validate(u)
+                        )
+                    )
+            
+            return project_members_list
         
     async def add_member(
         self, project_id: str, requester_id: str, data: ProjectMemberAdd
     ) -> ProjectMemberRead:
-        """
-        Direct add (no invite) — used by team leads and owners to immediately
-        assign a workspace member to the project.
-
-        The invite flow (inbox) should be preferred for the typical onboarding
-        path so the target user can see who is inviting them and accept/decline.
-        Direct add is kept for programmatic and admin use cases.
-        """
         async with self.uow:
             project = await self._require_project(project_id)
             await self._require_team_lead_or_owner(project, requester_id)
@@ -194,6 +206,13 @@ class ProjectService:
                         "The user must be a workspace member before they can be "
                         "added to a project. Invite them to the workspace first."
                     ),
+                )
+
+            # Block direct additions of workspace owners
+            if target_ws_member.is_owner:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Workspace owners are administrative members of all projects by default and cannot be added.",
                 )
 
             existing = await self.uow.project_members.get_by_project_and_user(
@@ -211,18 +230,23 @@ class ProjectService:
                 role=data.role,
             )
 
+            # Defensive check for direct additions to leads channel
             if data.role in (ProjectRole.team_lead, ProjectRole.advisor, ProjectRole.viewer):
                 leads_channel = await self.uow.channels.get_leads_channel(project_id)
                 if leads_channel:
-                    await self.uow.channel_members.create(
-                        channel_id=leads_channel.id,
-                        user_id=data.user_id,
-                        role=(
-                            ChannelMemberRole.channel_lead 
-                            if data.role == ProjectRole.team_lead 
-                            else ChannelMemberRole.member
-                        )
+                    existing_leads_member = await self.uow.channel_members.get_by_channel_and_user(
+                        leads_channel.id, data.user_id
                     )
+                    if not existing_leads_member:
+                        await self.uow.channel_members.create(
+                            channel_id=leads_channel.id,
+                            user_id=data.user_id,
+                            role=(
+                                ChannelMemberRole.channel_lead 
+                                if data.role == ProjectRole.team_lead 
+                                else ChannelMemberRole.member
+                            )
+                        )
 
             await self.uow.commit()
             return ProjectMemberRead.model_validate(member)
@@ -318,7 +342,7 @@ class ProjectService:
                 )
                 if cm is not None:
                     await self.uow.channel_members.delete(cm)
-                    
+
             await self.uow.project_members.delete(member)
             await self.uow.commit()
 

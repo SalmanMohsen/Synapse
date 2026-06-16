@@ -129,6 +129,8 @@ class ChannelService:
     # Member management                                                    #
     # ------------------------------------------------------------------ #
 
+    # backend/app/channel/service.py
+
     async def list_members(self, channel_id: str, requester_id: str) -> list[ChannelMemberRead]:
         async with self.uow:
             channel = await self._require_channel(channel_id)
@@ -136,10 +138,10 @@ class ChannelService:
             await self._require_project_access(project, requester_id)
             if channel.is_leads_channel:
                 await self._require_leads_channel_access(project, requester_id)
-            # Use the new joined query
+            
+            # 1. Fetch explicit channel members
             rows = await self.uow.channel_members.list_by_channel_with_users(channel_id)
-
-            return [
+            channel_members_list = [
                 ChannelMemberRead(
                     **ChannelMemberRead.model_validate(m).model_dump(exclude={"user"}),
                     user=UserRead.model_validate(u)
@@ -147,23 +149,34 @@ class ChannelService:
                 for m, u in rows
             ]
 
+            # Track user IDs that are already explicitly in the channel
+            existing_user_ids = {m.user_id for m in channel_members_list}
+
+            # 2. Append workspace owners virtually so they are visible as members
+            ws_rows = await self.uow.workspace_members.list_by_workspace_with_users(project.workspace_id)
+            for wm, u in ws_rows:
+                if wm.is_owner and u.id not in existing_user_ids:
+                    role = (
+                        ChannelMemberRole.channel_lead 
+                        if channel.is_leads_channel 
+                        else ChannelMemberRole.member
+                    )
+                    channel_members_list.append(
+                        ChannelMemberRead(
+                            id=f"owner-{wm.id}",
+                            channel_id=channel_id,
+                            user_id=u.id,
+                            role=role,
+                            joined_at=wm.joined_at,
+                            user=UserRead.model_validate(u)
+                        )
+                    )
+            
+            return channel_members_list
+
     async def add_member(
         self, channel_id: str, requester_id: str, data: ChannelMemberAdd
     ) -> ChannelMemberRead:
-        """
-        Directly add a project member to a channel.
-
-        Who may add:
-        - Team Lead or workspace owner (anywhere in the project).
-        - Channel Lead (in their own channel only).
-
-        The target must already be a project member — channel membership is
-        always a subset of project membership.
-
-        Fix #6: advisors and viewers may not be added to channels. Their
-        access is governed by their project role; assigning them to a channel
-        (especially as channel_lead) would contradict their role's intent.
-        """
         async with self.uow:
             channel = await self._require_channel(channel_id)
 
@@ -181,6 +194,18 @@ class ChannelService:
             target_project_member = await self.uow.project_members.get_by_project_and_user(
                 channel.project_id, data.user_id
             )
+            
+            # Check if the user is a workspace owner instead of project member
+            target_ws_member = await self.uow.workspace_members.get_by_workspace_and_user(
+                project.workspace_id, data.user_id
+            )
+            
+            if target_ws_member and target_ws_member.is_owner:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Workspace owners are administrative members of all channels by default and cannot be added.",
+                )
+
             if target_project_member is None:
                 raise HTTPException(
                     status_code=400,
@@ -190,7 +215,6 @@ class ChannelService:
                     ),
                 )
 
-            # Fix #6: block advisor/viewer from channel membership
             if target_project_member.role in _CHANNEL_INELIGIBLE_ROLES:
                 raise HTTPException(
                     status_code=400,
@@ -216,7 +240,6 @@ class ChannelService:
                 role=data.role,
             )
 
-            # §7.3 — auto-sync: channel leads get leads channel membership.
             if data.role == ChannelMemberRole.channel_lead:
                 await self._add_to_leads_channel_if_needed(
                     channel.project_id, data.user_id
