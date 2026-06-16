@@ -1,5 +1,8 @@
+# backend/app/workspace/service.py
+import redis.asyncio as aioredis
 from fastapi import HTTPException
 from app.auth.schemas import UserRead
+from app.websocket.manager import publish_to_user
 from .schemas import (
     WorkspaceMemberRead,
     WorkspaceCreate,
@@ -10,8 +13,13 @@ from .uow import AbstractWorkspaceUnitOfWork
 
 
 class WorkspaceService:
-    def __init__(self, uow: AbstractWorkspaceUnitOfWork) -> None:
+    def __init__(
+        self,
+        uow: AbstractWorkspaceUnitOfWork,
+        redis: aioredis.Redis | None = None,
+    ) -> None:
         self.uow = uow
+        self.redis = redis
 
     # ------------------------------------------------------------------ #
     # Workspace CRUD                                                       #
@@ -56,8 +64,26 @@ class WorkspaceService:
             if updates:
                 workspace = await self.uow.workspaces.update(workspace, **updates)
 
+            # Get the list of all workspace members to notify them in real-time
+            members = await self.uow.members.list_by_workspace(workspace_id)
+            member_ids = [m.user_id for m in members]
+
             await self.uow.commit()
-            return WorkspaceRead.model_validate(workspace)
+            result = WorkspaceRead.model_validate(workspace)
+
+            # Broadcast update to all members
+            if self.redis:
+                for user_id in member_ids:
+                    await publish_to_user(
+                        self.redis,
+                        user_id,
+                        {
+                            "event": "workspace.updated",
+                            "workspace": result.model_dump(mode="json"),
+                        },
+                    )
+
+            return result
 
     async def delete_workspace(
         self, workspace_id: str, requester_id: str
@@ -65,8 +91,25 @@ class WorkspaceService:
         async with self.uow:
             workspace = await self._require_workspace(workspace_id)
             await self._require_owner(workspace_id, requester_id)
+
+            # Get workspace members before deletion so we know who to notify
+            members = await self.uow.members.list_by_workspace(workspace_id)
+            member_ids = [m.user_id for m in members]
+
             await self.uow.workspaces.delete(workspace)
             await self.uow.commit()
+
+            # Broadcast deletion to all members
+            if self.redis:
+                for user_id in member_ids:
+                    await publish_to_user(
+                        self.redis,
+                        user_id,
+                        {
+                            "event": "workspace.deleted",
+                            "workspace_id": workspace_id,
+                        },
+                    )
 
     # ------------------------------------------------------------------ #
     # Member management                                                    #
@@ -77,10 +120,8 @@ class WorkspaceService:
             await self._require_workspace(workspace_id)
             await self._require_member(workspace_id, requester_id)
             
-            # Use the new joined query
             rows = await self.uow.members.list_by_workspace_with_users(workspace_id)
             
-            # Merge the member data with the user data into the Pydantic schema
             return [
                 WorkspaceMemberRead(
                     **WorkspaceMemberRead.model_validate(m).model_dump(exclude={"user"}),
@@ -119,22 +160,10 @@ class WorkspaceService:
     ) -> None:
         """
         Remove a member from the workspace.
-
-        Fix #5 — cascade cleanup: all of the user's project and channel
-        memberships within this workspace are deleted in the same transaction
-        so the data model invariant (workspace ⊃ project ⊃ channel membership)
-        is never violated.
-
-        Allowed callers:
-        - Any workspace owner may remove any other member.
-        - Any member may remove themselves (self-removal).
-
-        The last-owner invariant is enforced regardless of who asked.
         """
         async with self.uow:
             await self._require_workspace(workspace_id)
 
-            # Non-owners may only remove themselves.
             if requester_id != target_user_id:
                 await self._require_owner(workspace_id, requester_id)
 
@@ -152,14 +181,11 @@ class WorkspaceService:
                         detail="Cannot remove the last owner. Assign a new owner first.",
                     )
 
-            # Cascade: remove channel memberships before project memberships
-            # (channel membership is a subset of project membership).
             projects = await self.uow.projects.list_by_workspace(workspace_id)
             project_ids = [p.id for p in projects]
 
             if project_ids:
                 for project_id in project_ids:
-                    # Channel memberships in this project
                     channels = await self.uow.channels.list_by_project(project_id)
                     for channel in channels:
                         cm = await self.uow.channel_members.get_by_channel_and_user(
@@ -168,14 +194,12 @@ class WorkspaceService:
                         if cm is not None:
                             await self.uow.channel_members.delete(cm)
 
-                    # Project membership
                     pm = await self.uow.project_members.get_by_project_and_user(
                         project_id, target_user_id
                     )
                     if pm is not None:
                         await self.uow.project_members.delete(pm)
 
-            # Finally remove the workspace membership itself
             await self.uow.members.delete(member)
             await self.uow.commit()
 
