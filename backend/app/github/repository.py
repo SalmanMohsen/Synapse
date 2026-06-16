@@ -1,4 +1,3 @@
-# backend/app/github/repository.py (new file)
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from .models import GitIntegration, WebhookEvent
@@ -23,6 +22,14 @@ class GitIntegrationRepository:
     async def get_by_installation_id(self, installation_id: str) -> GitIntegration | None:
         result = await self.db.execute(
             select(GitIntegration).where(GitIntegration.github_app_installation_id == installation_id)
+        )
+        # Use .scalars().first() to gracefully return the first match instead of failing on multiple rows
+        return result.scalars().first()
+
+    async def get_by_repo_full_name(self, repo_full_name: str) -> GitIntegration | None:
+        """Find an integration record by its unique repository name (e.g. 'owner/repo')."""
+        result = await self.db.execute(
+            select(GitIntegration).where(GitIntegration.repo_full_name == repo_full_name)
         )
         return result.scalar_one_or_none()
 
