@@ -1,36 +1,61 @@
-# backend/app/github/router.py (new file)
+# backend/app/github/router.py
 import json
-from fastapi import APIRouter, Depends, Request, BackgroundTasks, status, HTTPException
+from fastapi import APIRouter, Depends, Request, Response, BackgroundTasks, status, HTTPException
 from fastapi.responses import RedirectResponse, HTMLResponse
 
 from app.auth.dependencies import get_current_user
 from app.auth.models import User
-from app.auth.router import _success_html
+from app.auth.router import _success_html, _error_html
+from app.config import get_settings
 
 from .dependencies import get_git_integration_service
 from .schemas import GitIntegrationRead, GitInstallUrlResponse
 from .service import GitIntegrationService
 
 router = APIRouter(tags=["github"])
+settings = get_settings()
 
 
 @router.get("/api/v1/projects/{project_id}/github/install", response_model=GitInstallUrlResponse)
 async def initiate_github_app_install(
     project_id: str,
+    response: Response,
     current_user: User = Depends(get_current_user),
     service: GitIntegrationService = Depends(get_git_integration_service),
 ) -> GitInstallUrlResponse:
-    return await service.get_install_url(project_id, current_user.id)
+    result = await service.get_install_url(project_id, current_user.id)
+    
+    # Store the pending project ID in a secure HTTP-only cookie
+    response.set_cookie(
+        "pending_github_project_id",
+        project_id,
+        max_age=600,
+        path="/",
+        httponly=True,
+        samesite="lax",
+        secure=settings.cookie_secure,
+    )
+    return result
 
 
 @router.get("/api/v1/github/app/callback")
 async def github_app_callback(
+    request: Request,
+    response: Response,
     installation_id: str,
-    state: str,
+    state: str | None = None,
     service: GitIntegrationService = Depends(get_git_integration_service),
 ):
-    await service.handle_callback(installation_id, state)
-    return HTMLResponse(_success_html("github_install_success"))
+    cookie_project_id = request.cookies.get("pending_github_project_id")
+    
+    try:
+        await service.handle_callback(installation_id, state, cookie_project_id)
+        response.delete_cookie("pending_github_project_id", path="/")
+        return HTMLResponse(_success_html("github_install_success"))
+    except Exception as exc:
+        response.delete_cookie("pending_github_project_id", path="/")
+        # Keep the popup responsive: convert the Python exception to closing HTML that logs the error
+        return HTMLResponse(_error_html(str(exc), "github_install_error"), status_code=200)
 
 
 @router.get("/api/v1/projects/{project_id}/github", response_model=GitIntegrationRead)

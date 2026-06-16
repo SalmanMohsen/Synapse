@@ -21,8 +21,9 @@ class GitIntegration(Base):
         nullable=False,
         unique=True,
     )
+    # Changed unique=True to unique=False to allow multiple projects to share one installation
     github_app_installation_id: Mapped[str] = mapped_column(
-        String(100), nullable=False, unique=True, index=True
+        String(100), nullable=False, unique=False, index=True
     )
     # e.g. "owner/repo"
     repo_full_name: Mapped[str] = mapped_column(String(200), nullable=False)
@@ -53,13 +54,10 @@ class WebhookEvent(Base):
     id: Mapped[str] = mapped_column(
         String, primary_key=True, default=lambda: str(uuid.uuid4())
     )
-    # X-GitHub-Delivery header value — unique constraint enforces idempotency.
     delivery_id: Mapped[str] = mapped_column(
         String(100), nullable=False, unique=True, index=True
     )
-    # e.g. "issues", "pull_request"
     event_type: Mapped[str] = mapped_column(String(100), nullable=False)
-    # e.g. "opened", "reopened", "closed"
     action: Mapped[str] = mapped_column(String(100), nullable=False)
     payload: Mapped[dict] = mapped_column(JSON, nullable=False)
     status: Mapped[WebhookEventStatus] = mapped_column(
@@ -67,12 +65,10 @@ class WebhookEvent(Base):
         nullable=False,
         default=WebhookEventStatus.pending,
     )
-    # Populated on failure.
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
-    # Set when status transitions to processed or failed.
     processed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -1,4 +1,3 @@
-# backend/app/github/service.py (new file)
 import base64
 import time
 import hmac
@@ -92,13 +91,27 @@ class GitIntegrationService:
             url = f"https://github.com/apps/{app_slug}/installations/new?state={state_token}"
             return GitInstallUrlResponse(install_url=url)
 
-    async def handle_callback(self, installation_id: str, state: str) -> str:
-        project_id = await self.redis.get(f"github_install_state:{state}")
-        if not project_id:
-            raise HTTPException(status_code=400, detail="Invalid or expired installation state.")
+    # In backend/app/github/service.py
 
-        await self.redis.delete(f"github_install_state:{state}")
+    async def handle_callback(
+        self, 
+        installation_id: str, 
+        state: str | None = None,
+        cookie_project_id: str | None = None,
+    ) -> None:
+        project_id = None
 
+        # 1. Resolve project_id via state parameter (Redis)
+        if state:
+            project_id = await self.redis.get(f"github_install_state:{state}")
+            if project_id:
+                await self.redis.delete(f"github_install_state:{state}")
+
+        # 2. Resolve via cookie fallback
+        if not project_id and cookie_project_id:
+            project_id = cookie_project_id
+
+        # 3. Fetch all repositories authorized under this installation from GitHub
         installation_token = await self._get_installation_access_token(installation_id)
         async with httpx.AsyncClient() as client:
             resp = await client.get(
@@ -124,11 +137,45 @@ class GitIntegrationService:
                     detail="No repositories are configured under this App installation."
                 )
 
-            repo = repositories[0]
-            repo_full_name = repo["full_name"]
-            default_branch = repo.get("default_branch", "main")
-
+        # 4. Smart Repository Selection:
+        # Find the best candidate among the authorized repositories.
+        # We skip repositories that are already linked to other projects.
+        selected_repo = None
         async with self.uow:
+            for r in repositories:
+                name = r["full_name"]
+                existing_link = await self.uow.git_integrations.get_by_repo_full_name(name)
+                
+                if not existing_link:
+                    # Candidate is completely unlinked — this is the best choice for a new link!
+                    selected_repo = r
+                    break
+                elif project_id and existing_link.project_id == project_id:
+                    # Candidate is already linked to the current project we are configuring.
+                    # We keep it as a fallback if no new unlinked repo is found.
+                    if not selected_repo:
+                        selected_repo = r
+
+            if not selected_repo:
+                # Fallback to the first available repository if all are already allocated
+                selected_repo = repositories[0]
+
+            repo_full_name = selected_repo["full_name"]
+            default_branch = selected_repo.get("default_branch", "main")
+
+            # 5. Resolve project_id via repo fallback if it is still unknown
+            if not project_id:
+                existing_by_repo = await self.uow.git_integrations.get_by_repo_full_name(repo_full_name)
+                if existing_by_repo:
+                    project_id = existing_by_repo.project_id
+
+            if not project_id:
+                raise HTTPException(
+                    status_code=400, 
+                    detail="Could not match GitHub App installation to any project. Setup session may have expired."
+                )
+
+            # 6. Save or update the project-level integration
             existing = await self.uow.git_integrations.get_by_project_id(project_id)
             if existing:
                 await self.uow.git_integrations.update(
@@ -138,10 +185,6 @@ class GitIntegrationService:
                     default_branch=default_branch,
                 )
             else:
-                existing_install = await self.uow.git_integrations.get_by_installation_id(str(installation_id))
-                if existing_install:
-                    await self.uow.git_integrations.delete(existing_install)
-
                 await self.uow.git_integrations.create(
                     project_id=project_id,
                     github_app_installation_id=str(installation_id),
@@ -149,8 +192,6 @@ class GitIntegrationService:
                     default_branch=default_branch,
                 )
             await self.uow.commit()
-
-        return None
 
     async def get_integration(self, project_id: str, requester_id: str) -> GitIntegrationRead:
         async with self.uow:
@@ -257,14 +298,16 @@ class GitIntegrationService:
                 await self.uow.commit()
 
     async def _handle_issue_opened(self, payload: dict) -> None:
-        installation_id = str(payload.get("installation", {}).get("id"))
-        if not installation_id:
-            raise ValueError("No installation ID located in webhook payload.")
+        repo_data = payload.get("repository", {})
+        repo_full_name = repo_data.get("full_name")
+        if not repo_full_name:
+            raise ValueError("No repository full name located in webhook payload.")
 
         async with self.uow:
-            integration = await self.uow.git_integrations.get_by_installation_id(installation_id)
+            # Query the precise project based on the repository name
+            integration = await self.uow.git_integrations.get_by_repo_full_name(repo_full_name)
             if not integration:
-                raise ValueError(f"Integration record not found for installation ID: {installation_id}")
+                raise ValueError(f"Integration record not found for repository: {repo_full_name}")
 
             project_id = integration.project_id
             leads_channel = await self.uow.channels.get_leads_channel(project_id)
@@ -348,14 +391,16 @@ class GitIntegrationService:
                 )
 
     async def _handle_issue_reopened(self, payload: dict) -> None:
-        installation_id = str(payload.get("installation", {}).get("id"))
-        if not installation_id:
-            raise ValueError("No installation ID located in webhook payload.")
+        repo_data = payload.get("repository", {})
+        repo_full_name = repo_data.get("full_name")
+        if not repo_full_name:
+            raise ValueError("No repository full name located in webhook payload.")
 
         async with self.uow:
-            integration = await self.uow.git_integrations.get_by_installation_id(installation_id)
+            # Query the precise project based on the repository name
+            integration = await self.uow.git_integrations.get_by_repo_full_name(repo_full_name)
             if not integration:
-                raise ValueError(f"Integration record not found for installation ID: {installation_id}")
+                raise ValueError(f"Integration record not found for repository: {repo_full_name}")
 
             project_id = integration.project_id
             issue_data = payload.get("issue", {})
