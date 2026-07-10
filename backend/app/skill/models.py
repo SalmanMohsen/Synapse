@@ -3,6 +3,7 @@ from datetime import datetime
 from enum import Enum as PyEnum
 from sqlalchemy import Enum, ForeignKey, String, Text, UniqueConstraint, func, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.dialects.postgresql import ENUM as pg_ENUM
 
 from app.database import Base
 from app.channel.models import ChannelDiscipline
@@ -31,7 +32,7 @@ class SkillFile(Base):
         Enum(SkillDimension, name="skilldimension"), nullable=False
     )
     discipline: Mapped[ChannelDiscipline | None] = mapped_column(
-        Enum(ChannelDiscipline, name="channeldiscipline"), nullable=True
+        pg_ENUM(ChannelDiscipline, name="channeldiscipline", create_type=False), nullable=True
     )
     file_content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
