@@ -15,15 +15,17 @@ from app.database import Base
 # Import every model here so Base.metadata is fully populated.
 # These imports are intentionally side-effect-only; the names are never
 # referenced directly in this file.
-from app.auth.models import User  # noqa: F401
-from app.workspace.models import Workspace, WorkspaceMember  # noqa: F401
-from app.project.models import Project, ProjectMember  # noqa: F401
-from app.channel.models import Channel, ChannelMember  # noqa: F401
+from app.auth.models import User 
+from app.workspace.models import Workspace, WorkspaceMember
+from app.project.models import Project, ProjectMember
+from app.channel.models import Channel, ChannelMember
 from app.inbox.models import InboxItem 
-from app.ticket.models import Ticket          # noqa: F401
-from app.message.models import Message        # noqa: F401
-from app.thread_state.models import ThreadState  # noqa: F401
-from app.github.models import GitIntegration, WebhookEvent  # noqa: F401
+from app.ticket.models import Ticket 
+from app.message.models import Message         
+from app.thread_state.models import ThreadState   
+from app.github.models import GitIntegration, WebhookEvent 
+from app.skill.models import SkillFile, SkillAssignment   
+from app.agent_run.models import AgentRun, AgentRunStepStatus, AgentRunStatus, AgentRunStep   
 
 settings = get_settings()
 
