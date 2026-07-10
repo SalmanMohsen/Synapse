@@ -30,6 +30,10 @@ class GitIntegration(Base):
     default_branch: Mapped[str] = mapped_column(
         String(100), nullable=False, default="main"
     )
+    # Commit SHA as of the last successful Qdrant ingestion run (planning-service
+    # step 3). Null until the first ingestion completes. Read/written directly by
+    # planning-service via its own local db.py — see build plan step 1.
+    last_ingested_sha: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
