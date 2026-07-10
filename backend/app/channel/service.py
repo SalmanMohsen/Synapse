@@ -1,5 +1,8 @@
 from enum import member
 
+import data
+import data
+from duckdb import project
 from fastapi import HTTPException
 from app.auth.schemas import UserRead
 from app.project.models import ProjectRole
@@ -14,6 +17,7 @@ from .schemas import (
     ChannelUpdate,
 )
 from .uow import AbstractChannelUnitOfWork
+from app.skill.repository import SkillRepository
 
 # Roles that are project-scoped only and must never get channel membership.
 _CHANNEL_INELIGIBLE_ROLES = {ProjectRole.advisor, ProjectRole.viewer}
@@ -51,6 +55,21 @@ class ChannelService:
                 is_leads_channel=False,
                 approval_policy=data.approval_policy,
             )
+
+            skill_repo = SkillRepository(self.uow.session)
+
+            # Check if a matching workspace specialty file exists for this discipline channel type
+            if data.discipline:
+                specialty_file = await skill_repo.get_specialty_file(project.workspace_id, data.discipline)
+                specialty_id = specialty_file.id if specialty_file else None
+    
+                # Materialize assignment entry automatically; technology remains deferred (configured via endpoint)
+                await skill_repo.create_assignment(
+                    channel_id=channel.id,
+                    specialty_file_id=specialty_id,
+                    technology_file_id=None
+            )
+
             await self.uow.commit()
             return ChannelRead.model_validate(channel)
 
