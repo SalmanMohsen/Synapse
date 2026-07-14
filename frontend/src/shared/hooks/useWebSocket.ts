@@ -86,6 +86,7 @@ export function useWebSocket() {
         queryClient.invalidateQueries({ queryKey: ['ticket', ticket_id] })
         // Invalidate message thread so the automated system message displays in real-time
         queryClient.invalidateQueries({ queryKey: ['messages', ticket_id] })
+        queryClient.invalidateQueries({ queryKey: ['agent-run'] })
       }
       if (channel_id) {
         queryClient.invalidateQueries({ queryKey: ['tickets', channel_id] })
