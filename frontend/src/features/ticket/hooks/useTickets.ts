@@ -3,6 +3,20 @@ import { ticketApi } from '../api/ticketApi'
 import type { TicketCreate, TicketUpdate, TicketRouteRequest, TicketRead } from '../types/ticket.types'
 import { toast } from '@/shared/hooks/useToast'
 
+export const useGeneratePlan = (ticketId: string, channelId: string) => {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => ticketApi.generatePlan(ticketId),
+    onSuccess: (ticket) => {
+      _patchTicketCache(qc, ticketId, channelId, ticket)
+      // Invalidate the agent run queries so that the PlanCard/preloader shows up
+      qc.invalidateQueries({ queryKey: ['agent-run'] })
+      toast('Plan generation triggered successfully', 'success')
+    },
+    onError: () => toast('Failed to trigger plan generation', 'error'),
+  })
+}
+
 export const useTickets = (channelId: string) =>
   useQuery({
     queryKey: ['tickets', channelId],

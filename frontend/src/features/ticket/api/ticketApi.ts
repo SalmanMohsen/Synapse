@@ -35,4 +35,7 @@ export const ticketApi = {
 
   split: (ticketId: string, data: TicketSplitRequest): Promise<TicketRead> =>
     api.post<TicketRead>(`/tickets/${ticketId}/split`, data).then((r) => r.data),
+  
+  generatePlan: (ticketId: string): Promise<TicketRead> =>
+    api.post<TicketRead>(`/tickets/${ticketId}/generate-plan`).then((r) => r.data),
 }
