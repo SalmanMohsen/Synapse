@@ -48,8 +48,8 @@ import type { MessageRead } from "@/features/message/types/message.types";
 import type { MessageListResponse } from "@/features/message/types/message.types";
 import { toast } from "@/shared/hooks/useToast";
 import styles from "./TicketDetailPage.module.css";
-import { PlanCard } from "@/features/agenRun/components/PlanCard";
-import { getPlanCardRunId } from "@/features/agenRun/utils";
+import { PlanCard } from "@/features/agentRun/components/PlanCard";
+import { getPlanCardRunId } from "@/features/agentRun/utils";
 
 // ── Types ──
 interface ChildDraft {
