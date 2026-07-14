@@ -20,6 +20,7 @@ from app.websocket.router import ws_router
 from app.workspace.router import router as workspace_router
 from app.github.router import router as github_router
 from app.skill.router import router as skill_router
+from app.agent_run.router import router as agent_run_router
 settings = get_settings()
 
 
@@ -76,3 +77,6 @@ app.include_router(github_router)
 
 # Skill Management
 app.include_router(skill_router)
+
+# Agent Runs (Planning Agent plan review — approve/reject/edit)
+app.include_router(agent_run_router)
