@@ -98,6 +98,15 @@ async def activate_ticket(
     service: TicketService = Depends(get_ticket_service),
 ):
     return await service.activate_ticket(ticket_id, current_user.id)
+
+
+@tickets_router.post("/{ticket_id}/generate-plan", response_model=TicketRead)
+async def generate_plan(
+    ticket_id: str,
+    current_user: User = Depends(get_current_user),
+    service: TicketService = Depends(get_ticket_service),
+):
+    return await service.generate_plan(ticket_id, current_user.id)
  
  
 @tickets_router.post("/{ticket_id}/close", response_model=TicketRead)

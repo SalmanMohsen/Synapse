@@ -1,8 +1,4 @@
 from enum import member
-
-import data
-import data
-from duckdb import project
 from fastapi import HTTPException
 from app.auth.schemas import UserRead
 from app.project.models import ProjectRole

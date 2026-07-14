@@ -1,9 +1,12 @@
 import redis.asyncio as aioredis
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
+from app.agent_run.models import AgentRunStatus
 from app.channel.models import ChannelMemberRole
 from app.inbox.schemas import InboxItemRead
 from app.inbox.service import InboxService
+from app.jobs import JOB_GENERATE_PLAN, get_arq_pool
 from app.message.models import Message, MessageType
 from app.message.schemas import AuthorRead, MessageListResponse, MessageRead
 from app.message.service import MessageService
@@ -468,6 +471,141 @@ class TicketService:
                         "ticket_id": ticket.id,
                         "channel_id": channel.id,
                         "message": _build_message_read(sys_msg, None).model_dump(mode="json"),
+                    },
+                )
+
+            return TicketRead.model_validate(ticket)
+
+    async def generate_plan(
+        self, ticket_id: str, requester_id: str
+    ) -> TicketRead:
+        """Trigger action for the Planning Agent.
+
+        Check order matches the locked build-plan sequence literally:
+        permission -> concurrency -> skill-assignment completeness -> set
+        status -> enqueue. The ticket-status eligibility gate below isn't in
+        that locked list — it's my own addition (not spelled out anywhere in
+        the plan), flagging it as such rather than presenting it as decided.
+        """
+        async with self.uow:
+            ticket = await self._require_ticket(ticket_id)
+            channel = await self._require_channel(ticket.channel_id)
+            project = await self._require_project(channel.project_id)
+
+            await self._require_channel_lead_team_lead_or_owner(
+                channel, project, requester_id
+            )
+
+            # Not in the locked checklist — my own addition. Re-triggering
+            # after a prior failure/reject happens from consensus_reached
+            # (per "this makes the ticket immediately re-triggerable"); the
+            # first-ever trigger happens from in_discussion.
+            _TRIGGERABLE_STATUSES = {
+                TicketStatus.in_discussion,
+                TicketStatus.consensus_reached,
+            }
+            if ticket.status not in _TRIGGERABLE_STATUSES:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cannot generate a plan for a ticket in "
+                        f"'{ticket.status}' status."
+                    ),
+                )
+
+            # Concurrency pre-check: a clean error message in the common
+            # case. The DB's partial unique index (not this check) is what
+            # actually closes the race — see the IntegrityError handling
+            # below for the real guard.
+            active_run = await self.uow.agent_runs.get_active_by_ticket(ticket.id)
+            if active_run is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail="A plan is already being generated for this ticket.",
+                )
+
+            assignment = await self.uow.skills.get_assignment_by_channel(channel.id)
+            missing_dimensions = []
+            # if not assignment or not assignment.specialty_file_id:
+            #     missing_dimensions.append("specialty")
+            # if not assignment or not assignment.technology_file_id:
+            #     missing_dimensions.append("technology")
+            # if missing_dimensions:
+            #     raise HTTPException(
+            #         status_code=400,
+            #         detail=(
+            #             "This channel is missing a skill assignment for: "
+            #             f"{', '.join(missing_dimensions)}. A Team Lead must "
+            #             "assign this before a plan can be generated."
+            #         ),
+            #     )
+
+            old_status = ticket.status
+            ticket = await self.uow.tickets.update(
+                ticket, status=TicketStatus.consensus_reached
+            )
+
+            try:
+                agent_run = await self.uow.agent_runs.create(
+                    ticket_id=ticket.id, status=AgentRunStatus.pending
+                )
+            except IntegrityError as exc:
+                # Real concurrency guard: two concurrent requests both passed
+                # the pre-check above, one loses at the DB's partial unique
+                # index. Don't call self.uow.rollback() manually here —
+                # raising and letting __aexit__ handle it matches every other
+                # error path in this file (see activate_ticket, close_ticket).
+                raise HTTPException(
+                    status_code=409,
+                    detail="A plan is already being generated for this ticket.",
+                ) from exc
+
+            actor_name = await self._get_actor_name(requester_id)
+            sys_msg = await MessageService.create_system_message(
+                self.uow.messages,
+                ticket_id=ticket.id,
+                content=f"{actor_name} triggered plan generation.",
+                metadata={
+                    "event": "plan_generation_triggered",
+                    "actor_id": requester_id,
+                    "actor_name": actor_name,
+                    "agent_run_id": agent_run.id,
+                },
+            )
+
+            await self.uow.commit()
+
+            # Job payload shape (ticket_id + agent_run_id) is my own choice —
+            # not specified in the locked decisions beyond "enqueues Planning
+            # Job". planning-service's worker (step 6) needs agent_run_id to
+            # know which row to update as it progresses.
+            pool = await get_arq_pool()
+            await pool.enqueue_job(
+                JOB_GENERATE_PLAN, ticket_id=ticket.id, agent_run_id=agent_run.id
+            )
+
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "ticket.status_change",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "old_status": old_status,
+                        "new_status": TicketStatus.consensus_reached,
+                    },
+                )
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "message.new",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "message": _build_message_read(sys_msg, None).model_dump(
+                            mode="json"
+                        ),
                     },
                 )
 

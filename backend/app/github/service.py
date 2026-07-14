@@ -3,6 +3,7 @@ import time
 import hmac
 import hashlib
 import uuid
+import logging
 from datetime import datetime, timezone
 
 import httpx
@@ -22,7 +23,9 @@ from app.ticket.schemas import TicketRead
 from .models import WebhookEventStatus, GitIntegration
 from .schemas import GitIntegrationRead, GitInstallUrlResponse
 from .uow import AbstractGitIntegrationUnitOfWork
+from app.jobs import get_arq_pool, JOB_INGEST_REPOSITORY
 
+logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
@@ -275,6 +278,8 @@ class GitIntegrationService:
                 await self._handle_issue_opened(event.payload)
             elif event.event_type == "issues" and event.action == "reopened":
                 await self._handle_issue_reopened(event.payload)
+            elif event.event_type == "push":
+                await self._handle_push(event.payload)
 
             async with self.uow:
                 event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
@@ -472,6 +477,40 @@ class GitIntegrationService:
                         "new_status": TicketStatus.backlog,
                     },
                 )
+
+    async def _handle_push(self, payload: dict) -> None:
+        repo_data = payload.get("repository", {})
+        repo_full_name = repo_data.get("full_name")
+        if not repo_full_name:
+            raise ValueError("No repository full name located in webhook payload.")
+
+        async with self.uow:
+            integration = await self.uow.git_integrations.get_by_repo_full_name(repo_full_name)
+            if not integration:
+                # Perfectly normal event if the repository exists in the org but is unlinked
+                logger.info("Ignoring push event: repository %s is not linked to any project.", repo_full_name)
+                return
+            
+            project_id = integration.project_id
+            default_branch = integration.default_branch
+
+        ref = payload.get("ref", "")  # e.g., "refs/heads/main"
+        expected_ref = f"refs/heads/{default_branch}"
+
+        # Filter out feature/topic branch updates
+        if ref != expected_ref:
+            logger.info(
+                "Ignoring push event for project %s: pushed ref %s does not match default branch %s",
+                project_id,
+                ref,
+                expected_ref
+            )
+            return
+
+        # Enqueue the background ingestion task
+        pool = await get_arq_pool()
+        await pool.enqueue_job(JOB_INGEST_REPOSITORY, project_id=project_id)
+        logger.info("Enqueued ingestion job for project %s on branch %s", project_id, default_branch)
 
     # ------------------------------------------------------------------ #
     # Access Rules Helpers                                                 #
