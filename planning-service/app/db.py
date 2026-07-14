@@ -1,8 +1,11 @@
 import os
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import AsyncGenerator
 
 from sqlalchemy import (
+    Boolean,
     Column,
     DateTime,
     Integer,
@@ -11,6 +14,9 @@ from sqlalchemy import (
     String,
     Table,
     Text,
+    select,
+    update,
+    insert,
 )
 from sqlalchemy.dialects.postgresql import ENUM as PGEnum
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
@@ -18,6 +24,8 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 # Explicit schema coupling mapping strictly to what planning-service reads/writes
 metadata = MetaData()
 
+# Postgres-native enum types, matching the type names backend's Alembic migration
+# already created. create_type=False stops Core from trying to CREATE TYPE.
 agent_run_status_enum = PGEnum(
     "pending",
     "running",
@@ -37,6 +45,30 @@ agent_run_step_status_enum = PGEnum(
     create_type=False,
 )
 
+message_type_enum = PGEnum(
+    "human",
+    "system",
+    "agent_plan_card",
+    name="messagetype",
+    create_type=False,
+)
+
+ticket_status_enum = PGEnum(
+    "backlog",
+    "routed",
+    "active",
+    "in_discussion",
+    "consensus_reached",
+    "plan_review",
+    "agent_working",
+    "in_review",
+    "merged",
+    "closed",
+    "split",
+    name="ticketstatus",
+    create_type=False,
+)
+
 # --- READ-ONLY TABLES ---
 
 tickets = Table(
@@ -46,10 +78,20 @@ tickets = Table(
     Column("channel_id", String, nullable=False),
     Column("title", String(500), nullable=False),
     Column("description", Text, nullable=True),
-    Column("status", String(50), nullable=False),
+    Column("status", ticket_status_enum, nullable=False),
     Column("source", String(50), nullable=False),
     Column("priority", String(50), nullable=False),
     Column("creator_id", String, nullable=True),
+)
+
+channels = Table(
+    "channels",
+    metadata,
+    Column("id", String, primary_key=True),
+    Column("project_id", String, nullable=False),
+    Column("name", String(100), nullable=False),
+    Column("discipline", String(50), nullable=True),
+    Column("is_leads_channel", Boolean, nullable=False, default=False),
 )
 
 messages = Table(
@@ -59,7 +101,7 @@ messages = Table(
     Column("ticket_id", String, nullable=False),
     Column("author_id", String, nullable=True),
     Column("content", Text, nullable=False),
-    Column("type", String(50), nullable=False),
+    Column("type", message_type_enum, nullable=False),
     Column("metadata_json", JSON, nullable=True),
     Column("deleted_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
@@ -124,7 +166,7 @@ git_integrations = Table(
     Column("github_app_installation_id", String(100), nullable=False),
     Column("repo_full_name", String(200), nullable=False),
     Column("default_branch", String(100), nullable=False),
-    Column("last_ingested_sha", String(100), nullable=True),  # Added per Step 2/Data Model changes
+    Column("last_ingested_sha", String(100), nullable=True),
 )
 
 
@@ -144,3 +186,73 @@ async def get_connection() -> AsyncGenerator[AsyncConnection, None]:
     """Provide a direct execution boundary for transaction commits."""
     async with engine.begin() as conn:
         yield conn
+
+
+def get_engine():
+    """Returns the shared engine."""
+    return engine
+
+
+async def close_engine() -> None:
+    """Disposes the engine's connection pool."""
+    await engine.dispose()
+
+
+# --- DATABASE AGENT RUN STEP TRACKING HELPERS ---
+
+async def create_agent_run_step(
+    agent_run_id: str,
+    step_number: int,
+    description: str,
+) -> str:
+    """Create a step in 'running' status. Commits immediately — independent
+    of whatever the caller does afterward, so it survives a later failure."""
+    step_id = str(uuid.uuid4())
+    async with get_connection() as conn:
+        await conn.execute(
+            agent_run_steps.insert().values(
+                id=step_id,
+                agent_run_id=agent_run_id,
+                step_number=step_number,
+                description=description,
+                status="running",
+                created_at=datetime.now(timezone.utc),
+            )
+        )
+    return step_id
+
+
+async def complete_agent_run_step(
+    step_id: str,
+    model_prompt: str | None = None,
+    model_response: str | None = None,
+) -> None:
+    async with get_connection() as conn:
+        await conn.execute(
+            agent_run_steps.update()
+            .where(agent_run_steps.c.id == step_id)
+            .values(
+                status="completed",
+                model_prompt=model_prompt,
+                model_response=model_response,
+            )
+        )
+
+
+async def fail_agent_run_step(
+    step_id: str,
+    error: str,
+    model_prompt: str | None = None,
+    model_response: str | None = None,
+) -> None:
+    async with get_connection() as conn:
+        await conn.execute(
+            agent_run_steps.update()
+            .where(agent_run_steps.c.id == step_id)
+            .values(
+                status="failed",
+                error=error,
+                model_prompt=model_prompt,
+                model_response=model_response,
+            )
+        )
