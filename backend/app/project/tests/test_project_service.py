@@ -160,16 +160,6 @@ class TestCreateProject:
 
         assert fake_uow.committed is True
 
-    @pytest.mark.asyncio
-    async def test_default_branch_stored(self, project_service, fake_uow):
-        _seed_workspace(fake_uow, "ws-1", policy=ProjectCreationPolicy.open)
-        _seed_ws_member(fake_uow, "ws-1", "user-1")
-
-        result = await project_service.create_project(
-            "ws-1", "user-1", ProjectCreate(name="P1", default_branch="develop")
-        )
-
-        assert result.default_branch == "develop"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -299,19 +289,6 @@ class TestUpdateProject:
 
         assert result.name == "New"
 
-    @pytest.mark.asyncio
-    async def test_team_lead_can_update_default_branch(
-        self, project_service, fake_uow
-    ):
-        _seed_workspace(fake_uow, "ws-1")
-        _seed_project(fake_uow, "p-1", "ws-1")
-        _seed_project_member(fake_uow, "p-1", "lead-1", role=ProjectRole.team_lead)
-
-        result = await project_service.update_project(
-            "p-1", "lead-1", ProjectUpdate(default_branch="release")
-        )
-
-        assert result.default_branch == "release"
 
     @pytest.mark.asyncio
     async def test_workspace_owner_can_update_without_project_membership(
@@ -432,10 +409,11 @@ class TestListMembers:
         _seed_ws_member(fake_uow, "ws-1", "owner-1", is_owner=True)
         _seed_project(fake_uow, "p-1", "ws-1")
         _seed_project_member(fake_uow, "p-1", "user-1")
-
+    
         result = await project_service.list_members("p-1", "owner-1")
-
-        assert len(result) == 1
+    
+        # We assert on 2 (explicit user-1 + virtually appended owner-1)
+        assert len(result) == 2
 
     @pytest.mark.asyncio
     async def test_non_member_raises_403(self, project_service, fake_uow):

@@ -30,7 +30,7 @@ from fastapi import HTTPException
 from app.inbox.models import InboxItemStatus, InboxItemType
 from app.project.models import ProjectRole
 
-from .conftest import (
+from app.inbox.tests.conftest import (
     make_channel,
     make_channel_member,
     make_item,

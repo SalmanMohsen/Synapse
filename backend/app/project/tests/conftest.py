@@ -13,6 +13,10 @@ FakeProjectMemberRepository so list_by_workspace_for_user can filter
 correctly without a real SQL JOIN — the UoW wires this up at construction.
 """
 import pytest
+import uuid
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
+
 from app.auth.tests.helpers import make_user
 from app.project.models import ProjectRole
 from app.project.service import ProjectService
@@ -41,10 +45,86 @@ class FakeWorkspaceMemberRepository:
         self._members[(member.workspace_id, member.user_id)] = member
         
     async def list_by_project_with_users(self, project_id: str) -> list:
-        return [(m, make_user(id=m.user_id, display_name="Test User", email="test@test.com")) for m in self._members.values() if m.project_id == project_id]
+        return [(m, make_user(id=m.user_id, display_name="Test User", email="test@test.com")) for m in self._members.values() if getattr(m, "project_id", None) == project_id]
     
     async def get_by_workspace_and_user(self, workspace_id: str, user_id: str):
         return self._members.get((workspace_id, user_id))
+
+    # ADDED missing helper methods for list_members and owners notifications
+    async def list_by_workspace_with_users(self, workspace_id: str) -> list:
+        return [
+            (m, make_user(id=m.user_id, display_name="Test User", email="test@test.com")) 
+            for m in self._members.values() 
+            if m.workspace_id == workspace_id
+        ]
+
+    async def list_owners_except(self, workspace_id: str, exclude_user_id: str) -> list:
+        return [
+            m for m in self._members.values() 
+            if m.workspace_id == workspace_id and m.is_owner and m.user_id != exclude_user_id
+        ]
+
+
+# ── Fake channel and inbox repos ──────────────────────────────────────────────
+
+class FakeChannelRepository:
+    def __init__(self):
+        self._channels = {}
+
+    def seed(self, channel) -> None:
+        self._channels[channel.id] = channel
+
+    async def create(self, **kwargs) -> MagicMock:
+        channel = MagicMock()
+        channel.id = kwargs.get("id", str(uuid.uuid4()))
+        channel.project_id = kwargs.get("project_id")
+        channel.name = kwargs.get("name")
+        channel.discipline = kwargs.get("discipline")
+        channel.is_leads_channel = kwargs.get("is_leads_channel", False)
+        channel.approval_policy = kwargs.get("approval_policy")
+        self.seed(channel)
+        return channel
+
+    async def list_by_project(self, project_id: str) -> list:
+        return [c for c in self._channels.values() if c.project_id == project_id]
+
+    async def get_leads_channel(self, project_id: str) -> MagicMock | None:
+        for c in self._channels.values():
+            if c.project_id == project_id and getattr(c, "is_leads_channel", False):
+                return c
+        return None
+
+
+class FakeChannelMemberRepository:
+    def __init__(self):
+        self._members = {}
+
+    async def create(self, **kwargs) -> MagicMock:
+        m = MagicMock()
+        m.id = str(uuid.uuid4())
+        m.channel_id = kwargs.get("channel_id")
+        m.user_id = kwargs.get("user_id")
+        m.role = kwargs.get("role")
+        self._members[(m.channel_id, m.user_id)] = m
+        return m
+
+    async def get_by_channel_and_user(self, channel_id: str, user_id: str):
+        return self._members.get((channel_id, user_id))
+
+    async def delete(self, member) -> None:
+        self._members.pop((member.channel_id, member.user_id), None)
+
+
+class FakeInboxItemRepository:
+    def __init__(self):
+        self._items = []
+
+    async def create(self, **kwargs) -> MagicMock:
+        item = MagicMock()
+        for k, v in kwargs.items():
+            setattr(item, k, v)
+        self._items.append(item)
+        return item
 
 
 # ── Fake project repos ────────────────────────────────────────────────────────
@@ -81,6 +161,14 @@ class FakeProjectMemberRepository:
 
     async def delete(self, member) -> None:
         self._members.pop((member.project_id, member.user_id), None)
+
+    # ADDED missing helper method used for listing project members
+    async def list_by_project_with_users(self, project_id: str) -> list:
+        return [
+            (m, make_user(id=m.user_id, display_name="Test User", email="test@test.com")) 
+            for m in self._members.values() 
+            if m.project_id == project_id
+        ]
 
 
 class FakeProjectRepository:
@@ -139,8 +227,13 @@ class FakeProjectUnitOfWork:
         self.workspaces = workspace_repo or FakeWorkspaceRepository()
         self.workspace_members = workspace_member_repo or FakeWorkspaceMemberRepository()
         self.project_members = project_member_repo or FakeProjectMemberRepository()
-        # project repo receives member repo reference for list_by_workspace_for_user
         self.projects = FakeProjectRepository(self.project_members)
+        
+        # ADDED newly required repositories
+        self.channels = FakeChannelRepository()
+        self.channel_members = FakeChannelMemberRepository()
+        self.inbox_items = FakeInboxItemRepository()
+        
         self.committed = False
         self.rolled_back = False
 
