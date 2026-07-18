@@ -144,6 +144,46 @@ services:
     networks:
       - synapse-network
 
+  code-service:
+    build:
+      context: ./code-service
+    container_name: synapse-code-service
+    restart: always
+    # Docker-outside-of-Docker: talk to the HOST daemon to spin up sandbox
+    # containers (Step 2), not a nested daemon.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - ENV=development
+      - PYTHONUNBUFFERED=1
+      - REDIS_URL=redis://redis:6379/0
+      - CODE_DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - LLM_BASE_URL=${LLM_BASE_URL}
+      - LLM_MODEL_NAME=${LLM_MODEL_NAME}
+      - GITHUB_APP_ID=${GITHUB_APP_ID}
+      - GITHUB_APP_PRIVATE_KEY_BASE64=${GITHUB_APP_PRIVATE_KEY_BASE64}
+      - CODE_REPO_WORK_ROOT=/data/code-repos
+      - CODE_REPO_WORK_ROOT_HOST=${CODE_REPO_WORK_ROOT_HOST:-./data/code-repos} 
+      - CODE_SANDBOX_IMAGE=synapse-code-sandbox:latest
+      - LITELLM_LOG=DEBUG
+    volumes:
+      - ./code-service:/app
+      - ${CODE_REPO_WORK_ROOT_HOST:-./data/code-repos}:/data/code-repos
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - synapse-network
+
+  code-sandbox:
+    build:
+      context: ./code-service/sandbox
+    image: synapse-code-sandbox:latest
+    profiles:
+      - setup
 volumes:
   postgres_data:
   redis_data:
