@@ -89,6 +89,7 @@ async def generate_development_plan(
             agent_run_id,
             step_number=step_counter[0],
             description=f"Chronological thread summarization loop (attempt {job_try})",
+            phase="planning",
         )
         step_counter[0] += 1
         try:
@@ -115,11 +116,12 @@ async def generate_development_plan(
             thread_summary=thread_summary,
         )
 
-    logger.info("Initiating Draft Plan generation call (Step 9)...")
+    logger.info("Initiating Draft Plan generation call...")
     draft_step_id = await create_agent_run_step(
         agent_run_id,
         step_number=step_counter[0],
         description=f"Draft Plan generation (attempt {job_try})",
+        phase="planning",
     )
     step_counter[0] += 1
 
@@ -148,6 +150,7 @@ async def generate_development_plan(
         agent_run_id,
         step_number=step_counter[0],
         description=f"Critique and revision of draft plan (attempt {job_try})",
+        phase="planning",
     )
     step_counter[0] += 1
 

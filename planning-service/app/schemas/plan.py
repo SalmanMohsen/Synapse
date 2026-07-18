@@ -1,6 +1,8 @@
 from enum import Enum
 from typing import List
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, model_validator, field_validator
+
+SANDBOX_MOUNT_PREFIX = "/workspace/repo/"
 
 
 class ActionType(str, Enum):
@@ -33,6 +35,13 @@ class PlanStep(BaseModel):
         ..., 
         description="Technical rationale justifying why this file modification is necessary and how it fits the architecture."
     )
+    @field_validator("target_file_path")
+    @classmethod
+    def normalize_target_file_path(cls, v: str) -> str:
+        v = v.strip()
+        if v.startswith(SANDBOX_MOUNT_PREFIX):
+            v = v[len(SANDBOX_MOUNT_PREFIX):]
+        return v.lstrip("/")
 
 
 class DevelopmentPlan(BaseModel):

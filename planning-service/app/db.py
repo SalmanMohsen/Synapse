@@ -69,6 +69,13 @@ ticket_status_enum = PGEnum(
     create_type=False,
 )
 
+agent_run_step_phase_enum = PGEnum(
+    "planning",
+    "execution",
+    name="agentrunstepphase",
+    create_type=False,
+)
+
 # --- READ-ONLY TABLES ---
 
 tickets = Table(
@@ -155,6 +162,7 @@ agent_run_steps = Table(
     Column("model_prompt", Text, nullable=True),
     Column("model_response", Text, nullable=True),
     Column("error", Text, nullable=True),
+    Column("phase", agent_run_step_phase_enum, nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -204,6 +212,7 @@ async def create_agent_run_step(
     agent_run_id: str,
     step_number: int,
     description: str,
+    phase: str = "planning",
 ) -> str:
     """Create a step in 'running' status. Commits immediately — independent
     of whatever the caller does afterward, so it survives a later failure."""
@@ -216,6 +225,7 @@ async def create_agent_run_step(
                 step_number=step_number,
                 description=description,
                 status="running",
+                phase=phase,
                 created_at=datetime.now(timezone.utc),
             )
         )
