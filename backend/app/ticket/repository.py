@@ -46,3 +46,14 @@ class TicketRepository:
         await self.db.flush()
         await self.db.refresh(ticket)
         return ticket
+    
+    async def get_by_project_and_pr_number(self, project_id: str, pr_number: int) -> Ticket | None:
+        result = await self.db.execute(
+            select(Ticket)
+            .join(Channel, Channel.id == Ticket.channel_id)
+            .where(
+                Channel.project_id == project_id,
+                Ticket.github_pr_number == pr_number,
+            )
+        )
+        return result.scalar_one_or_none()

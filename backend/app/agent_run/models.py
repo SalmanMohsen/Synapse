@@ -4,6 +4,7 @@ from enum import Enum as PyEnum
 
 from sqlalchemy import (
     JSON,
+    Boolean,
     DateTime,
     Enum,
     ForeignKey,
@@ -32,7 +33,15 @@ class AgentRunStepStatus(str, PyEnum):
     running = "running"
     completed = "completed"
     failed = "failed"
+    
+class AgentRunStepPhase(str, PyEnum):
+    planning = "planning"
+    execution = "execution"
 
+class CheckTier(str, PyEnum):
+    repo_test_suite = "repo_test_suite"
+    generic_validator = "generic_validator"
+    sanity_only = "sanity_only"
 
 class AgentRun(Base):
     __tablename__ = "agent_runs"
@@ -109,6 +118,25 @@ class AgentRunStep(Base):
     model_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_response: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Code Agent additions (Step 6) — which validation tier actually ran for
+    # this step; must be visible to a human reviewer.
+    check_tier: Mapped[CheckTier | None] = mapped_column(
+        Enum(CheckTier, name="checktier"), nullable=True
+    )
+    # Flagged when a step touches migration/alembic paths (observability).
+    requires_human_review: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
+    # arq attempt number this step record was produced under.
+    job_try: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Discriminates Planning Agent bookkeeping rows (draft/critique/grounding
+    # validation) from real Code Agent execution steps — checkpoint resume
+    # must only ever look at 'execution' rows.
+    phase: Mapped[AgentRunStepPhase] = mapped_column(
+        Enum(AgentRunStepPhase, name="agentrunstepphase"),
+        nullable=False,
+        default=AgentRunStepPhase.execution,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

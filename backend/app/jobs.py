@@ -18,7 +18,8 @@ from arq import ArqRedis, create_pool
 from arq.connections import RedisSettings
 
 JOB_INGEST_REPOSITORY = "ingest_repository_job"
-JOB_GENERATE_PLAN = "generate_plan"  # not enqueued until step 5
+JOB_GENERATE_PLAN = "generate_plan"  
+JOB_EXECUTE_PLAN = "execute_plan_job" 
 
 _pool: ArqRedis | None = None
 

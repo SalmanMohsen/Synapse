@@ -17,6 +17,7 @@ class TicketStatus(str, PyEnum):
     plan_review = "plan_review"              # Phase 4
     agent_working = "agent_working"          # Phase 4
     in_review = "in_review"                  # Phase 4
+    blocked = "blocked" 
     split = "split"    # terminal — ticket split into children
     closed = "closed"  # terminal — work done
 

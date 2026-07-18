@@ -3,16 +3,18 @@ import os
 import httpx
 import redis.asyncio as aioredis
 from fastapi import HTTPException
-
+import logging
 from app.agent_run.models import AgentRunStatus
 from app.project.models import ProjectRole
 from app.ticket.models import TicketStatus
 from app.ticket.uow import AbstractTicketUnitOfWork
 from app.websocket.manager import publish_to_channel
+from app.jobs import get_arq_pool, JOB_EXECUTE_PLAN
+
 
 QDRANT_URL = os.environ.get("QDRANT_URL", "http://qdrant:6333")
 QDRANT_COLLECTION = os.environ.get("QDRANT_COLLECTION", "codebase_chunks")
-
+logger = logging.getLogger(__name__)
 class AgentRunService:
     def __init__(
         self,
@@ -136,6 +138,19 @@ class AgentRunService:
             )
 
             await self.uow.commit()
+
+            # Enqueue the execute_plan_job on arq to hand-off control to code-service
+            try:
+                from app.jobs import get_arq_pool, JOB_EXECUTE_PLAN
+                pool = await get_arq_pool()
+                await pool.enqueue_job(
+                    JOB_EXECUTE_PLAN, 
+                    agent_run_id=run_id, 
+                    _queue_name="code_queue"  # Targets the isolated code queue
+                )
+                logger.info("Successfully enqueued execution plan job on code_queue for agent_run_id=%s", run_id)
+            except Exception as arq_err:
+                logger.error("Failed to enqueue execute_plan_job on Redis queue: %s", arq_err)
 
             if self.redis:
                 await publish_to_channel(

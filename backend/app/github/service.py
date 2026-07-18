@@ -280,6 +280,8 @@ class GitIntegrationService:
                 await self._handle_issue_reopened(event.payload)
             elif event.event_type == "push":
                 await self._handle_push(event.payload)
+            elif event.event_type == "pull_request" and event.action == "closed":
+                await self._handle_pull_request_closed(event.payload)
 
             async with self.uow:
                 event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
@@ -549,3 +551,56 @@ class GitIntegrationService:
                 status_code=403,
                 detail="You must be a member of this project to inspect integration details."
             )
+    
+    async def _handle_pull_request_closed(self, payload: dict) -> None:
+        repo_data = payload.get("repository", {})
+        repo_full_name = repo_data.get("full_name")
+        if not repo_full_name:
+            raise ValueError("No repository full name located in webhook payload.")
+    
+        pr_data = payload.get("pull_request", {})
+        pr_number = pr_data.get("number")
+        merged = pr_data.get("merged", False)
+    
+        async with self.uow:
+            integration = await self.uow.git_integrations.get_by_repo_full_name(repo_full_name)
+            if not integration:
+                raise ValueError(f"Integration record not found for repository: {repo_full_name}")
+    
+            project_id = integration.project_id
+            ticket = await self.uow.tickets.get_by_project_and_pr_number(project_id, pr_number)
+            if not ticket:
+                raise ValueError(f"No ticket found for merged PR #{pr_number} in project: {project_id}")
+    
+            channel = await self.uow.channels.get_by_id(ticket.channel_id)
+    
+            old_status = ticket.status
+            new_status = TicketStatus.closed if merged else TicketStatus.in_review
+            ticket = await self.uow.tickets.update(ticket, status=new_status)
+    
+            content = (
+                f"PR #{pr_number} merged. Ticket closed."
+                if merged
+                else f"PR #{pr_number} closed without merging."
+            )
+            await MessageService.create_system_message(
+                self.uow.messages,
+                ticket_id=ticket.id,
+                content=content,
+                metadata={"event": "pull_request_closed", "github_pr_number": pr_number, "merged": merged},
+            )
+    
+            await self.uow.commit()
+    
+            if self.redis:
+                await publish_to_channel(
+                    self.redis,
+                    channel.id,
+                    {
+                        "event": "ticket.status_change",
+                        "ticket_id": ticket.id,
+                        "channel_id": channel.id,
+                        "old_status": old_status,
+                        "new_status": new_status,
+                    },
+                )
