@@ -3,7 +3,8 @@
 .page {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 49px); /* subtract topbar */
+  flex: 1;
+  min-height: 0; 
   overflow: hidden;
 }
 

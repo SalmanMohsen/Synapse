@@ -268,6 +268,7 @@ function TicketView({
 
   return (
     <AppShell
+      fullBleed
       breadcrumbs={[
         { label: "Workspaces", href: "/" },
         ...(channel

@@ -16,15 +16,25 @@ export function AppShell({
   children,
   breadcrumbs,
   wide,
+  fullBleed,
 }: {
   children: ReactNode
   breadcrumbs?: BreadcrumbItem[]
   wide?: boolean
+  fullBleed?: boolean
 }) {
   return (
-    <div className={styles.page}>
+    <div className={fullBleed ? styles.pageFullBleed : styles.page}>
       <TopBar breadcrumbs={breadcrumbs} />
-      <div className={wide ? styles.pageContentWide : styles.pageContent}>
+      <div
+        className={
+          fullBleed
+            ? styles.pageContentFull
+            : wide
+              ? styles.pageContentWide
+              : styles.pageContent
+        }
+      >
         {children}
       </div>
     </div>
