@@ -2,7 +2,7 @@
 
 Coordinates cloning, sandbox setup, locking, conflict prevention, OpenHands
 conversation flow, step validation, soft-failure correction loops, stuck-loop detection,
-dangerous-action boundaries (migration observers), checkpoint-resumes, step commit & push,
+dangerous-action boundaries (migration/CI-CD path observers), checkpoint-resumes, step commit & push,
 codebase manifest updates, PR creation, progress events, and blocker escalations.
 Tears down the sandbox.
 """
@@ -70,6 +70,48 @@ def is_migration_path(path: str) -> bool:
     normalized = path.replace("\\", "/").lower()
     parts = normalized.split("/")
     return "migrations" in parts or "alembic" in parts
+
+
+def is_protected_ci_path(path: str) -> bool:
+    """Checks if a file path belongs to CI/CD workflow or pipeline config.
+
+    Added to the same protected list as migrations (Guardrail 1, build plan):
+    a prompt injection that isn't neutralized by the untrusted-context
+    boundary should still not be able to reach outside the ticket's actual
+    scope by rewriting the pipeline that would otherwise catch it (e.g.
+    disabling tests in CI).
+    """
+    normalized = path.replace("\\", "/").lower()
+    parts = normalized.split("/")
+
+    for i in range(len(parts) - 1):
+        if parts[i] == ".github" and parts[i + 1] == "workflows":
+            return True
+
+    if "circleci" in parts or ".circleci" in parts:
+        return True
+
+    protected_ci_filenames = {
+        ".gitlab-ci.yml",
+        ".gitlab-ci.yaml",
+        "azure-pipelines.yml",
+        "jenkinsfile",
+        ".travis.yml",
+    }
+    return bool(parts) and parts[-1] in protected_ci_filenames
+
+
+def wrap_untrusted(content: str) -> str:
+    """Delimits content that did not originate from code-service's own
+    generation — plan/ticket-derived task text, or file content read back
+    from the repo — so the agent treats it as reference material, never as
+    instructions (Guardrail 1, build plan).
+
+    The meaning of this boundary is established once, in the agent's system
+    prompt (see UNTRUSTED_CONTEXT_SYSTEM_SUFFIX in openhands/conversation.py);
+    this function only wraps the untrusted span at each call site.
+    """
+    return f"<untrusted_context>\n{content}\n</untrusted_context>"
 
 
 async def cleanup_unfinished_steps(agent_run_id: str) -> None:
@@ -313,7 +355,7 @@ def format_step_prompt(step: Dict[str, Any]) -> str:
     action_type = step.get("action_type", "")
 
     prompt = f"Executing Plan Step {step_num}:\n"
-    prompt += f"Task description: {description}\n"
+    prompt += f"Task description: {wrap_untrusted(description)}\n"
     if target_file:
         # Strip any leading slashes and resolve the absolute path inside the sandbox mount
         clean_target_file = target_file.lstrip("/")
@@ -507,12 +549,15 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
         bus.subscribe(stuck_loop_subscriber)
 
         # --- Dangerous Action Watcher ---
-        def migration_detection_subscriber(event: AgentEvent) -> None:
+        def protected_path_subscriber(event: AgentEvent) -> None:
             if event.touched_paths and current_step_record_id:
-                has_migration = any(is_migration_path(fp) for fp in event.touched_paths)
-                if has_migration:
+                has_protected_touch = any(
+                    is_migration_path(fp) or is_protected_ci_path(fp)
+                    for fp in event.touched_paths
+                )
+                if has_protected_touch:
                     logger.warning(
-                        "Schema migration files touched: %s. Flagging step %s.",
+                        "Protected path touched (migration or CI/CD config): %s. Flagging step %s.",
                         event.touched_paths,
                         current_step_record_id,
                     )
@@ -521,7 +566,7 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
                         main_loop
                     )
 
-        bus.subscribe(migration_detection_subscriber)
+        bus.subscribe(protected_path_subscriber)
 
         # 6. Step Loop execution
         for step in steps:
@@ -703,7 +748,7 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
                             "Please review the exact, raw failure logs below and make the required corrections "
                             "in the codebase:\n\n"
                             f"=== FAILURE LOG ===\n{err_details}\n===================\n"
-                            f"{touched_content}\n"
+                            f"{wrap_untrusted(touched_content)}\n"
                             "Resolve these errors directly. Do not exceed the scope of the target task."
                         )
                     else:

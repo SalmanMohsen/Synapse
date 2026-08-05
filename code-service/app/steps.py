@@ -89,7 +89,7 @@ async def fail_agent_run_step(
 
 
 async def flag_requires_human_review(step_id: str) -> None:
-    """Set requires_human_review=True on an existing step (migration-path touch)."""
+    """Set requires_human_review=True on an existing step (migration or protected CI/CD path touch)."""
     async with get_connection() as conn:
         await conn.execute(
             agent_run_steps.update()
