@@ -1,9 +1,9 @@
-import os
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 
+from app.config import DATABASE_URL
 from sqlalchemy import (
     Boolean,
     Column,
@@ -32,6 +32,7 @@ agent_run_status_enum = PGEnum(
     "awaiting_review",
     "approved",
     "rejected",
+    "rejected_out_of_scope",
     "failed",
     name="agentrunstatus",
     create_type=False,
@@ -179,8 +180,6 @@ git_integrations = Table(
 
 
 # --- DATABASE CONNECTION ENGINE ---
-
-DATABASE_URL = os.getenv("PLANNING_DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/synapse")
 
 engine = create_async_engine(
     DATABASE_URL,

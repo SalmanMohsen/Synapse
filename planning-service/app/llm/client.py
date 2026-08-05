@@ -30,6 +30,7 @@ async def get_completion(
     user_prompt: str,
     response_model: Optional[Type[T]] = None,
     temperature: float = 0.2,
+    max_tokens: int = 1500,
 ) -> str | T:
     """Send a chat completion request to vLLM.
 
@@ -62,7 +63,7 @@ async def get_completion(
             model=model_name,
             messages=messages,
             temperature=temperature,
-            max_tokens=1500,  # Matches the 4K output budget reservation
+            max_tokens=max_tokens,  # Default matches the 4K output budget reservation; callers pass a smaller cap for cheap calls (e.g. the scope gate)
             extra_body=extra_body or None,
         )
         content = completion.choices[0].message.content

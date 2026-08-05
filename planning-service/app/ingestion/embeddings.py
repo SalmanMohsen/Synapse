@@ -10,9 +10,9 @@ from functools import lru_cache
 from sentence_transformers import SentenceTransformer
 
 EMBEDDING_MODEL_NAME = os.environ.get(
-    "EMBEDDING_MODEL_NAME", "nomic-ai/nomic-embed-text-v1.5"
+    "EMBEDDING_MODEL_NAME", "nomic-ai/CodeRankEmbed"
 )
-EMBED_DIM = 768
+EMBED_DIM = 256
 
 # nomic-embed-text-v1.5's actual native context length (rotary position
 # embeddings) — not a tunable safety margin. The 2048 figure that shows up in

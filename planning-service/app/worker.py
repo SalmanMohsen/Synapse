@@ -9,7 +9,6 @@ Job names/payloads must match what the backend enqueues:
 
 import json
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -20,6 +19,7 @@ from openai import AsyncOpenAI
 from sqlalchemy import select, update, insert
 from transformers import AutoTokenizer
 
+from app import config
 from app.db import (
     close_engine,
     get_engine,
@@ -37,7 +37,7 @@ from app.db import (
 from app.ingestion.service import ingest_repository
 from app.ingestion.embeddings import _get_model, embed_query
 from app.ingestion.qdrant_store import retrieve_chunks
-from app.agent.planner import generate_development_plan
+from app.agent.planner import generate_development_plan, run_scope_gate, ScopeGateRejected
 from app.agent.validation import validate_development_plan_grounding, FileGroundingValidationError
 
 # Set up logging format for long-running worker output
@@ -66,13 +66,13 @@ async def startup(ctx: Dict[Any, Any]) -> None:
     # 2. Warm up the SentenceTransformer embedding model
     logger.info(
         "Pre-loading SentenceTransformer weights (%s)...",
-        os.environ.get("EMBEDDING_MODEL_NAME", "nomic-ai/nomic-embed-text-v1.5"),
+        config.EMBEDDING_MODEL_NAME,
     )
     ctx["embeddings_model"] = _get_model()
 
     # 3. vLLM client + Qwen tokenizer
-    llm_base_url = os.environ["LLM_BASE_URL"]
-    llm_model_name = os.environ["LLM_MODEL_NAME"]
+    llm_base_url = config.LLM_BASE_URL
+    llm_model_name = config.LLM_MODEL_NAME
 
     ctx["llm_client"] = AsyncOpenAI(base_url=llm_base_url, api_key="not-needed")
     ctx["llm_model_name"] = llm_model_name
@@ -129,12 +129,7 @@ async def generate_plan_job(ctx: Dict[Any, Any], ticket_id: str, agent_run_id: s
     redis_client = ctx["redis"]
 
     job_try = ctx.get("job_try", 1)
-    if job_try == 1:
-        defer_seconds = 60
-    elif job_try == 2:
-        defer_seconds = 300
-    else:
-        defer_seconds = 900
+    defer_seconds = config.job_backoff_seconds(job_try)
 
     channel_id = None  
 
@@ -212,7 +207,7 @@ async def generate_plan_job(ctx: Dict[Any, Any], ticket_id: str, agent_run_id: s
 
     except Exception as e:
         logger.error("Initialization failure during generate_plan_job setup: %s", e, exc_info=True)
-        if job_try < 3:
+        if job_try < config.MAX_JOB_ATTEMPTS:
             logger.info("Scheduling backoff retry #%s in %s seconds...", job_try + 1, defer_seconds)
             raise Retry(defer=defer_seconds)
         else:
@@ -222,13 +217,27 @@ async def generate_plan_job(ctx: Dict[Any, Any], ticket_id: str, agent_run_id: s
     # Coordinate retrieval and LLM call pipeline
     step_counter = [1]
     try:
+        # Guardrail 2 (build plan): pre-flight scope/actionability gate,
+        # AgentRunStep #0 — runs before the Qdrant RAG query and before the
+        # draft/critique pair. Raises ScopeGateRejected (caught below) if the
+        # ticket text isn't actionable engineering work.
+        await run_scope_gate(
+            client=client,
+            model_name=model_name,
+            ticket_title=ticket_row["title"],
+            ticket_description=ticket_row["description"] or "",
+            thread_messages=thread_messages,
+            agent_run_id=agent_run_id,
+            job_try=job_try,
+        )
+
         retrieval_query = (
             f"Title: {ticket_row['title']}\n"
             f"Description: {ticket_row['description'] or ''}\n\n"
             "Discussion:\n" + "\n".join(thread_messages)
         )
         query_vector = embed_query(retrieval_query)
-        retrieved_chunks = await retrieve_chunks(project_id, query_vector, limit=8)
+        retrieved_chunks = await retrieve_chunks(project_id, query_vector, limit=config.RETRIEVAL_TOP_K)
 
         # Draft -> critique. Each internal step commits itself as it goes
         # (see planner.py) — no shared transaction with what follows.
@@ -333,6 +342,78 @@ async def generate_plan_job(ctx: Dict[Any, Any], ticket_id: str, agent_run_id: s
 
         logger.info("Successfully completed plan generation for ticket %s", ticket_id)
 
+    except ScopeGateRejected as exc:
+        logger.info(
+            "Pre-flight scope gate rejected ticket %s as out of scope: %s",
+            ticket_id, exc.reason,
+        )
+        system_msg_id = str(uuid.uuid4())
+        msg_content = f"AI Planning Agent rejected this ticket as out of scope: {exc.reason}"
+        created_at = datetime.now(timezone.utc)
+
+        async with get_connection() as conn:
+            await conn.execute(
+                update(tickets).where(tickets.c.id == ticket_id).values(status="consensus_reached")
+            )
+            await conn.execute(
+                update(agent_runs)
+                .where(agent_runs.c.id == agent_run_id)
+                .values(status="rejected_out_of_scope", updated_at=created_at)
+            )
+            await conn.execute(
+                messages.insert().values(
+                    id=system_msg_id,
+                    ticket_id=ticket_id,
+                    author_id=None,
+                    content=msg_content,
+                    type="system",
+                    metadata_json={
+                        "event": "plan_rejected_out_of_scope",
+                        "agent_run_id": agent_run_id,
+                        "reason": exc.reason,
+                    },
+                    created_at=created_at,
+                )
+            )
+        # commit done -> now publish
+        if redis_client:
+            await redis_client.publish(
+                f"channel:{channel_id}:events",
+                _json_dumps({
+                    "event": "ticket.status_change",
+                    "ticket_id": ticket_id,
+                    "channel_id": channel_id,
+                    "old_status": "consensus_reached",
+                    "new_status": "consensus_reached",
+                }),
+            )
+            message_payload = {
+                "id": system_msg_id,
+                "ticket_id": ticket_id,
+                "author_id": None,
+                "author": None,
+                "content": msg_content,
+                "type": "system",
+                "metadata_json": {
+                    "event": "plan_rejected_out_of_scope",
+                    "agent_run_id": agent_run_id,
+                    "reason": exc.reason,
+                },
+                "deleted_at": None,
+                "edited_at": None,
+                "created_at": created_at,
+                "updated_at": created_at,
+            }
+            await redis_client.publish(
+                f"channel:{channel_id}:events",
+                _json_dumps({
+                    "event": "message.new",
+                    "ticket_id": ticket_id,
+                    "channel_id": channel_id,
+                    "message": message_payload,
+                }),
+            )
+
     except FileGroundingValidationError as exc:
         logger.error("Logical validation fail: %s. Reverting ticket and run states.", exc)
         system_msg_id = str(uuid.uuid4())
@@ -396,7 +477,7 @@ async def generate_plan_job(ctx: Dict[Any, Any], ticket_id: str, agent_run_id: s
 
     except Exception as exc:
         logger.error("Technical failure encountered: %s", exc, exc_info=True)
-        if job_try < 4:
+        if job_try < config.MAX_JOB_ATTEMPTS:
             logger.info("Scheduling backoff retry #%s in %s seconds...", job_try + 1, defer_seconds)
             raise Retry(defer=defer_seconds)
         else:
@@ -492,7 +573,7 @@ async def _handle_terminal_failure(redis_client: Any, ticket_id: str, channel_id
 
 class WorkerSettings:
     """Settings class parsed directly by the arq command-line runner."""
-    redis_settings = RedisSettings.from_dsn(os.environ["REDIS_URL"])
+    redis_settings = RedisSettings.from_dsn(config.REDIS_URL)
 
     functions = [
         ingest_repository_job,
@@ -502,5 +583,5 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
 
-    job_timeout = 600  # Give plan generation tasks up to 10 minutes to run
-    max_jobs = 4
+    job_timeout = config.JOB_TIMEOUT_SECONDS  # Give plan generation tasks up to 10 minutes to run
+    max_jobs = config.WORKER_MAX_CONCURRENT_JOBS

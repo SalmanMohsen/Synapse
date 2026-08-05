@@ -5,6 +5,21 @@ from pydantic import BaseModel, Field, model_validator, field_validator
 SANDBOX_MOUNT_PREFIX = "/workspace/repo/"
 
 
+class ScopeGateResult(BaseModel):
+    """Output schema for the pre-flight scope/actionability gate (Guardrail
+    2, build plan) — the cheap check run before the Qdrant RAG query and the
+    draft/critique pair, deciding whether the ticket text is an actionable
+    engineering request against this project's codebase at all."""
+    actionable: bool = Field(
+        ...,
+        description="Whether this ticket text is an actionable engineering request against this project's codebase.",
+    )
+    reason: str = Field(
+        ...,
+        description="A short explanation of the actionable/not-actionable determination.",
+    )
+
+
 class ActionType(str, Enum):
     """The categories of file-system or architectural changes allowed in a step."""
     create = "create"
