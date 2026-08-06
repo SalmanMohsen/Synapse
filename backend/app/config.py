@@ -19,7 +19,7 @@ class Settings(BaseSettings):
 
     # CORS / OAuth redirects — must be the exact browser-facing frontend origin
     frontend_url: str = "http://localhost:5173"
-    backend_url: str = "https://sacrament-revision-wages.ngrok-free.dev "
+    backend_url: str = ""
 
     # GitHub OAuth App credentials
     github_client_id: str = ""
