@@ -22,11 +22,7 @@ from app.db import (
     messages,
     tickets,
 )
-from app.git.github_auth import (
-    authenticated_clone_url,
-    get_installation_token,
-    open_pull_request,
-)
+from app.git_providers import GitIntegrationRef, get_git_provider
 from app.git.operations import (
     PushRejectedError,
     branch_name,
@@ -36,11 +32,16 @@ from app.git.operations import (
     has_changes,
     push,
 )
+from app.guardrails import (
+    DynamicLockSubscriber,
+    ProtectedPathSubscriber,
+    RunContext,
+    StuckLoopSubscriber,
+)
 from app.locks import (
     LockConflictError,
     LockError,
     SemanticConflictError,
-    acquire_dynamic_locks,
     get_redis_client,
     register_step_and_acquire_locks,
     release_locks,
@@ -54,7 +55,6 @@ from app.steps import (
     complete_agent_run_step,
     create_agent_run_step,
     fail_agent_run_step,
-    flag_requires_human_review,
 )
 from app.validation import validate_step_changes
 
@@ -63,42 +63,6 @@ logger = logging.getLogger(__name__)
 
 class SoftAIFailureError(RuntimeError):
     """Raised when the soft-failure correction budget is exhausted."""
-
-
-def is_migration_path(path: str) -> bool:
-    """Checks if a file path belongs to migrations or alembic directories."""
-    normalized = path.replace("\\", "/").lower()
-    parts = normalized.split("/")
-    return "migrations" in parts or "alembic" in parts
-
-
-def is_protected_ci_path(path: str) -> bool:
-    """Checks if a file path belongs to CI/CD workflow or pipeline config.
-
-    Added to the same protected list as migrations (Guardrail 1, build plan):
-    a prompt injection that isn't neutralized by the untrusted-context
-    boundary should still not be able to reach outside the ticket's actual
-    scope by rewriting the pipeline that would otherwise catch it (e.g.
-    disabling tests in CI).
-    """
-    normalized = path.replace("\\", "/").lower()
-    parts = normalized.split("/")
-
-    for i in range(len(parts) - 1):
-        if parts[i] == ".github" and parts[i + 1] == "workflows":
-            return True
-
-    if "circleci" in parts or ".circleci" in parts:
-        return True
-
-    protected_ci_filenames = {
-        ".gitlab-ci.yml",
-        ".gitlab-ci.yaml",
-        "azure-pipelines.yml",
-        "jenkinsfile",
-        ".travis.yml",
-    }
-    return bool(parts) and parts[-1] in protected_ci_filenames
 
 
 def wrap_untrusted(content: str) -> str:
@@ -215,6 +179,7 @@ async def fetch_execution_context(agent_run_id: str) -> Dict[str, Any] | None:
                 tickets.c.description.label("ticket_description"),
                 channels.c.id.label("channel_id"),
                 channels.c.project_id,
+                git_integrations.c.provider, 
                 git_integrations.c.github_app_installation_id,
                 git_integrations.c.repo_full_name,
                 git_integrations.c.default_branch,
@@ -384,38 +349,51 @@ async def inject_loop_warning_async(conversation: Any, warning_msg: str) -> None
     await asyncio.to_thread(conversation.send_message, warning_msg)
 
 
-async def abort_due_to_stuck_loop(
-    run_id: str,
-    ticket_id: str,
-    channel_id: str,
-    step_desc: str,
-    evidence: str,
-    sandbox_handle: Any,
-    repo_full_name: str,
-    branch: str
-) -> None:
-    """Aborts the run immediately when a loop budget is exhausted."""
-    logger.error("Forcibly aborting execution due to stuck loop pattern: %s", evidence)
-    await update_ticket_status(ticket_id, "blocked")
-    await update_run_status(run_id, "failed")
-    await insert_blocker_card(
-        ticket_id=ticket_id,
-        channel_id=channel_id,
-        step_desc=step_desc,
-        category="StuckLoop",
-        evidence=evidence,
-        repo_full_name=repo_full_name,
-        branch=branch
-    )
-    teardown_sandbox(sandbox_handle)
+async def _run_conversation_or_abort(conversation: Any, ctx: RunContext) -> None:
+    """Runs conversation.run() in a worker thread, racing it against a
+    guardrail-requested abort (ctx.abort_event).
+
+    This is the fix for the known race condition: a guardrail (dynamic lock
+    conflict, stuck loop) used to call teardown_sandbox() directly from its
+    own callback, with no coordination against whatever this coroutine (or
+    the commit/push/manifest-update steps right after it) was doing at that
+    exact moment. Now a guardrail only sets ctx.step_exception and wakes
+    ctx.abort_event -- it never touches the sandbox. If the abort wins the
+    race, this function returns as soon as the signal arrives instead of
+    waiting for the OpenHands thread to finish on its own; that thread is
+    left to finish in the background (its result, if any, is discarded and
+    only logged), and control returns immediately so the orchestrator can
+    unwind through its normal exception handling and tear the sandbox down
+    itself, exactly once, in run_agent_plan's finally block.
+    """
+    run_task = asyncio.create_task(asyncio.to_thread(conversation.run))
+    abort_task = asyncio.create_task(ctx.abort_event.wait())
+
+    done, _ = await asyncio.wait({run_task, abort_task}, return_when=asyncio.FIRST_COMPLETED)
+
+    if abort_task in done:
+        def _log_orphaned_run(f: asyncio.Task) -> None:
+            if f.cancelled():
+                return
+            exc = f.exception()
+            if exc is not None:
+                logger.warning(
+                    "OpenHands conversation.run() raised after an abort was "
+                    "already requested (result discarded): %s", exc
+                )
+
+        run_task.add_done_callback(_log_orphaned_run)
+        raise ctx.step_exception or RuntimeError("Run aborted by a guardrail with no exception recorded.")
+
+    abort_task.cancel()
+    await run_task  # propagate any exception from conversation.run itself
+    if ctx.step_exception is not None:
+        raise ctx.step_exception
 
 
 async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
     """Executes the complete development plan step-by-step with safety guards."""
     logger.info("Starting execution of Agent Run %s (Try %d)", agent_run_id, job_try)
-
-    step_exception: Exception | None = None
-
 
     # 1. Clean up stale steps & load Completed Checkpoints
     await cleanup_unfinished_steps(agent_run_id)
@@ -439,8 +417,6 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
     steps = sorted(steps, key=lambda s: s.get("step_number", 0))
 
     project_id = ctx["project_id"]
-    installation_id = ctx["github_app_installation_id"]
-    repo_name = ctx["repo_full_name"]
     default_branch = ctx["default_branch"]
     ticket_id = ctx["ticket_id"]
     ticket_title = ctx["ticket_title"]
@@ -448,9 +424,17 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
     channel_id = ctx["channel_id"]
     branch = branch_name(ticket_id, ticket_title)
 
+    integration = GitIntegrationRef(
+        provider=ctx["provider"],
+        external_ref=ctx["github_app_installation_id"],
+        repo_full_name=ctx["repo_full_name"],
+    )
+    repo_name = integration.repo_full_name
+    git_provider = get_git_provider(integration.provider)
+
     # 4. Retrieve authentication and clone branch
-    token = await get_installation_token(installation_id)
-    clone_url = authenticated_clone_url(repo_name, token)
+    token = await git_provider.get_access_token(integration)
+    clone_url = git_provider.build_authenticated_clone_url(integration, token)
 
     host_repo_path, _ = await clone_and_checkout(
         agent_run_id=agent_run_id,
@@ -469,104 +453,37 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
     sandbox_handle = create_sandbox(agent_run_id=agent_run_id, host_repo_path=resolved_host_repo_path)
 
     try:
-        bus = EventBus()
         main_loop = asyncio.get_running_loop()
 
+        # Shared state read/written by the step loop below and by the three
+        # guardrail subscribers -- see guardrails/context.py. Guardrails only
+        # ever call ctx.request_abort(); they never touch sandbox_handle.
+        # This object is what used to be a set of closure-captured local
+        # variables (current_step_locks, active_fencing_token, etc.) plus a
+        # `nonlocal step_exception` -- now they're fields on ctx instead.
+        # Constructed before bus/conversation setup so it's guaranteed to
+        # exist for the except clauses below even if open_conversation itself
+        # fails.
+        ctx = RunContext(
+            agent_run_id=agent_run_id,
+            project_id=project_id,
+            ticket_id=ticket_id,
+            channel_id=channel_id,
+            repo_full_name=repo_name,
+            branch=branch,
+            main_loop=main_loop,
+        )
+
+        bus = EventBus()
         logger.info("Opening long-lived OpenHands conversation inside Sandbox")
         conversation = await asyncio.to_thread(open_conversation, sandbox_handle, bus)
 
-        # State container variables read/written by single-registration listeners
-        current_step_locks = set()
-        active_fencing_token = 0
-        active_detector: StuckLoopDetector | None = None
-        current_step_description = ""
-        current_step_record_id = ""
+        async def inject_warning(warning_msg: str) -> None:
+            await inject_loop_warning_async(conversation, warning_msg)
 
-        # Thread-safe logical exception register slot (Pitches Bug 1 & Bug 2)
-        step_exception: Exception | None = None
-
-        # --- Dynamic Lock Subscription ---
-        def dynamic_lock_subscriber(event: AgentEvent) -> None:
-            if event.touched_paths:
-                new_files = [fp for fp in event.touched_paths if fp not in current_step_locks]
-                if new_files:
-                    logger.info("Mid-step edits detected. Acquiring locks: %s", new_files)
-                    
-                    # Schedule coroutine and listen to outcome (Bug 2 patch)
-                    fut = asyncio.run_coroutine_threadsafe(
-                        acquire_dynamic_locks(
-                            run_id=agent_run_id,
-                            project_id=project_id,
-                            file_paths=new_files,
-                            fencing_token=active_fencing_token,
-                        ),
-                        main_loop
-                    )
-                    
-                    def on_lock_complete(f) -> None:
-                        try:
-                            f.result()
-                        except Exception as e:
-                            nonlocal step_exception
-                            # Register the logical exception
-                            step_exception = e
-                            # Forcefully teardown the container to instantly abort OH conversation execution
-                            teardown_sandbox(sandbox_handle)
-                            
-                    fut.add_done_callback(on_lock_complete)
-                    current_step_locks.update(new_files)
-
-        bus.subscribe(dynamic_lock_subscriber)
-
-        # --- Stuck Loop Subscription ---
-        def stuck_loop_subscriber(event: AgentEvent) -> None:
-            if active_detector:
-                try:
-                    warning_msg = active_detector.process_event(event)
-                    if warning_msg:
-                        asyncio.run_coroutine_threadsafe(
-                            inject_loop_warning_async(conversation, warning_msg),
-                            main_loop
-                        )
-                except StuckLoopTriggered as triggered:
-                    nonlocal step_exception
-                    # Register the logical exception (Bug 1 patch)
-                    step_exception = triggered
-                    asyncio.run_coroutine_threadsafe(
-                        abort_due_to_stuck_loop(
-                            run_id=agent_run_id,
-                            ticket_id=ticket_id,
-                            channel_id=channel_id,
-                            step_desc=current_step_description,
-                            evidence=str(triggered),
-                            sandbox_handle=sandbox_handle,
-                            repo_full_name=repo_name,
-                            branch=branch
-                        ),
-                        main_loop
-                    )
-
-        bus.subscribe(stuck_loop_subscriber)
-
-        # --- Dangerous Action Watcher ---
-        def protected_path_subscriber(event: AgentEvent) -> None:
-            if event.touched_paths and current_step_record_id:
-                has_protected_touch = any(
-                    is_migration_path(fp) or is_protected_ci_path(fp)
-                    for fp in event.touched_paths
-                )
-                if has_protected_touch:
-                    logger.warning(
-                        "Protected path touched (migration or CI/CD config): %s. Flagging step %s.",
-                        event.touched_paths,
-                        current_step_record_id,
-                    )
-                    asyncio.run_coroutine_threadsafe(
-                        flag_requires_human_review(current_step_record_id),
-                        main_loop
-                    )
-
-        bus.subscribe(protected_path_subscriber)
+        bus.subscribe(DynamicLockSubscriber(ctx).handle)
+        bus.subscribe(StuckLoopSubscriber(ctx, inject_warning).handle)
+        bus.subscribe(ProtectedPathSubscriber(ctx).handle)
 
         # 6. Step Loop execution
         for step in steps:
@@ -581,13 +498,12 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
             action_type = step.get("action_type", "")
 
             # Reset step context safely
-            current_step_description = description
-            current_step_locks.clear()
+            ctx.current_step_description = description
+            ctx.current_step_locks.clear()
             if target_file:
-                current_step_locks.add(target_file)
+                ctx.current_step_locks.add(target_file)
 
-            active_detector = StuckLoopDetector()
-            # Reset exception register before starting the step
+            ctx.active_detector = StuckLoopDetector()
 
             # Insert initial Postgres run step record
             step_record_id = await create_agent_run_step(
@@ -596,19 +512,19 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
                 description=description,
                 job_try=job_try,
             )
-            current_step_record_id = step_record_id
+            ctx.current_step_record_id = step_record_id
 
             # Lock Acquisition
             try:
-                active_fencing_token = await register_step_and_acquire_locks(
+                ctx.active_fencing_token = await register_step_and_acquire_locks(
                     run_id=agent_run_id,
                     project_id=project_id,
                     ticket_id=ticket_id,
                     step_number=step_num,
-                    file_paths=list(current_step_locks),
+                    file_paths=list(ctx.current_step_locks),
                     purpose_summary=f"Ticket: {ticket_title}. Step {step_num}: {description}",
                 )
-                logger.info("Locks acquired successfully. Counter token: %d", active_fencing_token)
+                logger.info("Locks acquired successfully. Counter token: %d", ctx.active_fencing_token)
             except (LockConflictError, SemanticConflictError) as conflict:
                 logger.warning("Execution blocked for run %s step %d: %s", agent_run_id, step_num, conflict)
                 await update_ticket_status(ticket_id, "blocked")
@@ -655,17 +571,13 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
             try:
                 logger.info("Executing agent runner for step %d", step_num)
                 await asyncio.to_thread(conversation.send_message, prompt)
-                await asyncio.to_thread(conversation.run)
-                
-                # Check if background thread registered a logical blocker during running (Bug 1 & 2 patch)
-                if step_exception is not None:
-                    raise step_exception
-                    
+                await _run_conversation_or_abort(conversation, ctx)
+
             except Exception as run_exc:
-                # Capture and elevate logical exceptions recorded in background callbacks instead of the connection drop (Bug 1 & 2 patch)
-                if step_exception is not None:
-                    run_exc = step_exception
-                    
+                # Capture and elevate logical exceptions recorded by a guardrail
+                if ctx.step_exception is not None:
+                    run_exc = ctx.step_exception
+
                 logger.exception("Agent execution crashed for step %d", step_num)
                 await fail_agent_run_step(
                     step_id=step_record_id,
@@ -673,15 +585,15 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
                     check_tier="sanity_only",
                     model_prompt=prompt,
                 )
-                await release_locks(agent_run_id, project_id, list(current_step_locks))
+                await release_locks(agent_run_id, project_id, list(ctx.current_step_locks))
                 raise
 
             # --- Soft-Failure Correction Loop ---
             try:
                 for attempt in range(1, correction_budget + 1):
-                    # Check if background thread registered a logical blocker (Bug 1 & 2 patch)
-                    if step_exception is not None:
-                        raise step_exception
+                    # Check if a guardrail registered an abort since the last attempt
+                    if ctx.step_exception is not None:
+                        raise ctx.step_exception
 
                     touched_this_step = await changed_files(host_repo_path)
                     logger.info(
@@ -766,7 +678,7 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
 
                     logger.info("Injecting soft-failure feedback to agent (Attempt %d)", attempt + 1)
                     await asyncio.to_thread(conversation.send_message, feedback_prompt)
-                    await asyncio.to_thread(conversation.run)
+                    await _run_conversation_or_abort(conversation, ctx)
 
                 if not passed_validation:
                     all_errors_log = "\n---\n".join(validation_failures)
@@ -850,19 +762,19 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
                 )
 
             except Exception as step_exc:
-                # Capture and elevate logical exceptions recorded in background callbacks (Bug 1 & 2 patch)
-                if step_exception is not None:
-                    step_exc = step_exception
+                # Capture and elevate logical exceptions recorded by a guardrail
+                if ctx.step_exception is not None:
+                    step_exc = ctx.step_exception
                 logger.exception("Step %d execution failed", step_num)
                 raise
             finally:
                 logger.info("Releasing step locks for run %s", agent_run_id)
-                await release_locks(agent_run_id, project_id, list(current_step_locks))
+                await release_locks(agent_run_id, project_id, list(ctx.current_step_locks))
 
         # Completed all steps successfully
         logger.info("All plan steps for Agent Run %s completed successfully", agent_run_id)
 
-        # --- Step 16: GitHub Pull Request Creation ---
+        # --- Step 16: Pull/Merge Request Creation ---
         pr_title = f"ai/ticket-{ticket_id}: {ticket_title}"
         completed_steps_details = await fetch_completed_steps_details(agent_run_id)
         
@@ -872,10 +784,9 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
             completed_steps=completed_steps_details
         )
         
-        logger.info("Opening GitHub Pull Request for branch: %s targeting base: %s", branch, default_branch)
-        pr_payload = await open_pull_request(
-            installation_id=installation_id,
-            repo_full_name=repo_name,
+        logger.info("Opening pull request for branch: %s targeting base: %s", branch, default_branch)
+        pr_payload = await git_provider.open_pull_request(
+            integration,
             head_branch=branch,
             base_branch=default_branch,
             title=pr_title,
@@ -884,7 +795,7 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
         
         pr_number = pr_payload.get("number")
         pr_html_url = pr_payload.get("html_url", "")
-        logger.info("GitHub Pull Request #%s created successfully: %s", pr_number, pr_html_url)
+        logger.info("Pull request #%s created successfully: %s", pr_number, pr_html_url)
         
         # Save PR number in Postgres and transition ticket state
         if pr_number:
@@ -895,7 +806,7 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
 
         # --- Step 17: Completion Card Event ---
         completion_card_content = (
-            f"🎉 **Implementation Complete!** Pull Request #{pr_number} has been opened: "
+            f" **Implementation Complete!** Pull Request #{pr_number} has been opened: "
             f"[View Pull Request]({pr_html_url})\n\n"
             "This completes the agent's automated execution loop. The code is ready for human review."
         )
@@ -925,7 +836,7 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
         await insert_blocker_card(
             ticket_id=ticket_id,
             channel_id=channel_id,
-            step_desc=current_step_description or "Step execution block",
+            step_desc=ctx.current_step_description or "Step execution block",
             category="SoftAIFailure",
             evidence=str(soft_err),
             repo_full_name=repo_name,
@@ -935,8 +846,8 @@ async def run_agent_plan(agent_run_id: str, job_try: int) -> None:
 
     except Exception as exc:
         # Unexpected technical exception; propagate up to arq worker to trigger retry schedules
-        if step_exception is not None:
-            exc = step_exception
+        if ctx.step_exception is not None:
+            exc = ctx.step_exception
         logger.error("Hard Technical system failure captured for run %s: %s", agent_run_id, exc)
         raise
 
