@@ -30,15 +30,12 @@ from app.db import (
     skill_files,
     skill_assignments,
     agent_runs,
-    create_agent_run_step,
-    complete_agent_run_step,
-    fail_agent_run_step,
 )
 from app.ingestion.service import ingest_repository
-from app.ingestion.embeddings import _get_model, embed_query
-from app.ingestion.qdrant_store import retrieve_chunks
-from app.agent.planner import generate_development_plan, run_scope_gate, ScopeGateRejected
-from app.agent.validation import validate_development_plan_grounding, FileGroundingValidationError
+from app.ingestion.embeddings import _get_model
+from app.agent.planner import ScopeGateRejected
+from app.agent.validation import FileGroundingValidationError
+from app.pipeline import run_planning_pipeline
 
 # Set up logging format for long-running worker output
 logging.basicConfig(
@@ -214,70 +211,25 @@ async def generate_plan_job(ctx: Dict[Any, Any], ticket_id: str, agent_run_id: s
             await _handle_terminal_failure(redis_client, ticket_id, channel_id, agent_run_id, f"Database or setup initialization failed: {e}")
             return
 
-    # Coordinate retrieval and LLM call pipeline
+    # Run the planning pipeline (scope gate -> retrieval -> draft/critique ->
+    # grounding validation). Stage sequencing lives in app.pipeline now; this
+    # function only supplies job context and reacts to the outcome.
     step_counter = [1]
     try:
-        # Guardrail 2 (build plan): pre-flight scope/actionability gate,
-        # AgentRunStep #0 — runs before the Qdrant RAG query and before the
-        # draft/critique pair. Raises ScopeGateRejected (caught below) if the
-        # ticket text isn't actionable engineering work.
-        await run_scope_gate(
-            client=client,
-            model_name=model_name,
-            ticket_title=ticket_row["title"],
-            ticket_description=ticket_row["description"] or "",
-            thread_messages=thread_messages,
-            agent_run_id=agent_run_id,
-            job_try=job_try,
-        )
-
-        retrieval_query = (
-            f"Title: {ticket_row['title']}\n"
-            f"Description: {ticket_row['description'] or ''}\n\n"
-            "Discussion:\n" + "\n".join(thread_messages)
-        )
-        query_vector = embed_query(retrieval_query)
-        retrieved_chunks = await retrieve_chunks(project_id, query_vector, limit=config.RETRIEVAL_TOP_K)
-
-        # Draft -> critique. Each internal step commits itself as it goes
-        # (see planner.py) — no shared transaction with what follows.
-        final_plan = await generate_development_plan(
+        final_plan = await run_planning_pipeline(
             client=client,
             model_name=model_name,
             count_tokens_fn=count_tokens_fn,
-            specialty_skill=specialty_skill,
-            technology_skill=technology_skill,
             ticket_title=ticket_row["title"],
             ticket_description=ticket_row["description"] or "",
-            retrieved_chunks=retrieved_chunks,
             thread_messages=thread_messages,
+            specialty_skill=specialty_skill,
+            technology_skill=technology_skill,
+            project_id=project_id,
             agent_run_id=agent_run_id,
-            step_counter=step_counter,
             job_try=job_try,
+            step_counter=step_counter,
         )
-
-        # Step 11: File-grounding validation — also self-committing now.
-        validation_step_id = await create_agent_run_step(
-            agent_run_id,
-            step_number=step_counter[0],
-            description=f"File-grounding validation pass (attempt {job_try})",
-        )
-        step_counter[0] += 1
-
-        try:
-            await validate_development_plan_grounding(project_id, final_plan)
-            await complete_agent_run_step(
-                validation_step_id,
-                model_prompt="Validate modify/delete targets exist, create targets do not exist",
-                model_response="Grounding validation completed cleanly.",
-            )
-        except FileGroundingValidationError as exc:
-            await fail_agent_run_step(
-                validation_step_id,
-                error=str(exc),
-                model_prompt="Validate modify/delete targets exist, create targets do not exist",
-            )
-            raise exc
 
         # Terminal state change: this is the one thing that DOES need to be
         # atomic as a group. Commit it, THEN publish.
