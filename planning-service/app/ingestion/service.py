@@ -1,9 +1,6 @@
 """Top-level ingestion orchestration.
 
-A callable async function, not a standalone script — invoked by the BullMQ
-worker (step 6) on a schedule/backfill basis, and later dispatched by the
-push-webhook handler (step 4). No change to this logic when step 4 wires up
-the webhook — only what calls it changes.
+A callable async function, not a standalone script — only what calls it changes.
 """
 
 import logging
@@ -12,7 +9,8 @@ import os
 from sqlalchemy import select, update
 
 from app.db import get_connection, git_integrations
-from app.ingestion import chunking, embeddings, github_auth, qdrant_store, repo_sync
+from app.git_providers import GitIntegrationRef, get_git_provider
+from app.ingestion import chunking, embeddings, qdrant_store, repo_sync
 
 logger = logging.getLogger(__name__)
 
@@ -46,16 +44,24 @@ async def ingest_repository(project_id: str) -> None:
     (empty diff, nothing to embed) — safe to call from a webhook handler,
     a manual backfill, or a retry after a prior failed attempt alike.
     """
-    integration = await _get_git_integration(project_id)
-    token = await github_auth.get_installation_token(
-        integration["github_app_installation_id"]
+    integration_row = await _get_git_integration(project_id)
+
+    # git_integrations doesn't have a `provider` column yet -- every row is
+    # implicitly GitHub today, hardcoded here until that (backend-owned)
+    # migration lands. Everything from this line down only talks to
+    # `git_provider`, never to GitHub by name.
+    integration = GitIntegrationRef(
+        provider=integration_row["provider"],
+        external_ref=integration_row["github_app_installation_id"],
+        repo_full_name=integration_row["repo_full_name"],
     )
-    clone_url = github_auth.authenticated_clone_url(
-        integration["repo_full_name"], token
-    )
+    git_provider = get_git_provider(integration.provider)
+
+    token = await git_provider.get_access_token(integration)
+    clone_url = git_provider.build_authenticated_clone_url(integration, token)
 
     repo_path = await repo_sync.sync_repo(project_id, clone_url)
-    diff = await repo_sync.diff_since(repo_path, integration["last_ingested_sha"])
+    diff = await repo_sync.diff_since(repo_path, integration_row["last_ingested_sha"])
 
     await qdrant_store.ensure_collection()
 

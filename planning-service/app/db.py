@@ -172,6 +172,7 @@ git_integrations = Table(
     metadata,
     Column("id", String, primary_key=True),
     Column("project_id", String, nullable=False),
+    Column("provider", String(50), nullable=False, server_default="github"),
     Column("github_app_installation_id", String(100), nullable=False),
     Column("repo_full_name", String(200), nullable=False),
     Column("default_branch", String(100), nullable=False),
