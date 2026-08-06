@@ -82,24 +82,24 @@ async def handle_github_webhook(
     background_tasks: BackgroundTasks,
     service: GitIntegrationService = Depends(get_git_integration_service),
 ):
+    """GitHub's webhook route specifically -- a GitLab/Azure DevOps addition
+    gets its own sibling route (e.g. /api/v1/webhooks/gitlab), since each
+    vendor's webhook settings UI needs its own URL to point at anyway. This
+    route no longer reads GitHub-specific header names itself -- that
+    knowledge now lives only in GitHubProvider (app.git_providers.github),
+    reached via service.handle_webhook. All this route does is hand over
+    the raw request.
+    """
     body_bytes = await request.body()
     try:
         payload = json.loads(body_bytes.decode("utf-8"))
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid JSON payload structure.")
 
-    delivery_id = request.headers.get("X-GitHub-Delivery", "")
-    event_type = request.headers.get("X-GitHub-Event", "")
-    action = payload.get("action", "")
-    signature = request.headers.get("X-Hub-Signature-256")
-
-    await service.handle_webhook(
-        delivery_id=delivery_id,
-        event_type=event_type,
-        action=action,
-        payload=payload,
+    delivery_id = await service.handle_webhook(
+        headers=dict(request.headers),
         body_bytes=body_bytes,
-        signature=signature,
+        payload=payload,
     )
 
     background_tasks.add_task(service.process_webhook_event, delivery_id)

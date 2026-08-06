@@ -21,6 +21,9 @@ class GitIntegration(Base):
         nullable=False,
         unique=True,
     )
+    provider: Mapped[str] = mapped_column(
+    String(50), nullable=False, default="github", server_default="github"
+    )
     # Changed unique=True to unique=False to allow multiple projects to share one installation
     github_app_installation_id: Mapped[str] = mapped_column(
         String(100), nullable=False, unique=False, index=True
@@ -30,6 +33,7 @@ class GitIntegration(Base):
     default_branch: Mapped[str] = mapped_column(
         String(100), nullable=False, default="main"
     )
+    
     # Commit SHA as of the last successful Qdrant ingestion run (planning-service
     # step 3). Null until the first ingestion completes. Read/written directly by
     # planning-service via its own local db.py — see build plan step 1.
@@ -43,6 +47,7 @@ class GitIntegration(Base):
         onupdate=func.now(),
         nullable=False,
     )
+    
 
 
 class WebhookEventStatus(str, PyEnum):

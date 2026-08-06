@@ -1,15 +1,9 @@
-import base64
-import time
-import hmac
-import hashlib
 import uuid
 import logging
 from datetime import datetime, timezone
 
-import httpx
 import redis.asyncio as aioredis
 from fastapi import HTTPException
-from jose import jwt
 
 from app.project.models import ProjectRole
 from app.ticket.models import TicketStatus, TicketSource, TicketPriority
@@ -17,8 +11,8 @@ from app.inbox.schemas import InboxItemRead
 from app.inbox.service import InboxService
 from app.message.service import MessageService
 from app.websocket.manager import publish_to_user, publish_to_channel
-from app.config import get_settings
 from app.ticket.schemas import TicketRead
+from app.git_providers import GitProvider, NormalizedGitEvent, get_git_provider
 
 from .models import WebhookEventStatus, GitIntegration
 from .schemas import GitIntegrationRead, GitInstallUrlResponse
@@ -26,7 +20,6 @@ from .uow import AbstractGitIntegrationUnitOfWork
 from app.jobs import get_arq_pool, JOB_INGEST_REPOSITORY
 
 logger = logging.getLogger(__name__)
-settings = get_settings()
 
 
 class GitIntegrationService:
@@ -34,50 +27,16 @@ class GitIntegrationService:
         self,
         uow: AbstractGitIntegrationUnitOfWork,
         redis: aioredis.Redis,
+        git_provider: GitProvider | None = None,
     ) -> None:
         self.uow = uow
         self.redis = redis
-
-    def _generate_github_app_jwt(self) -> str:
-        if not settings.github_app_private_key_base64:
-            raise HTTPException(
-                status_code=500,
-                detail="GitHub App credentials are not configured on the server."
-            )
-        try:
-            private_key_pem = base64.b64decode(settings.github_app_private_key_base64).decode("utf-8")
-        except Exception as e:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to decode the base64-encoded GitHub App private key: {e}"
-            )
-
-        now = int(time.time())
-        payload = {
-            "iat": now - 60,
-            "exp": now + (10 * 60),
-            "iss": settings.github_app_id,
-        }
-        return jwt.encode(payload, private_key_pem, algorithm="RS256")
-
-    async def _get_installation_access_token(self, installation_id: str) -> str:
-        app_jwt = self._generate_github_app_jwt()
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"https://api.github.com/app/installations/{installation_id}/access_tokens",
-                headers={
-                    "Authorization": f"Bearer {app_jwt}",
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": "Synapse-App",
-                },
-                timeout=10,
-            )
-            if resp.status_code != 201:
-                raise HTTPException(
-                    status_code=resp.status_code,
-                    detail=f"Could not generate GitHub App installation token: {resp.text}"
-                )
-            return resp.json()["token"]
+        # git_integrations doesn't have a `provider` column yet -- every row
+        # is implicitly GitHub today, hence the hardcoded default. Once that
+        # (Alembic) migration lands, this becomes
+        # get_git_provider(integration.provider) resolved per-integration
+        # instead of once per service instance.
+        self.git_provider = git_provider or get_git_provider("github")
 
     async def get_install_url(self, project_id: str, requester_id: str) -> GitInstallUrlResponse:
         async with self.uow:
@@ -90,8 +49,7 @@ class GitIntegrationService:
             state_token = str(uuid.uuid4())
             await self.redis.setex(f"github_install_state:{state_token}", 600, project_id)
 
-            app_slug = settings.github_app_slug
-            url = f"https://github.com/apps/{app_slug}/installations/new?state={state_token}"
+            url = self.git_provider.build_install_url(state_token)
             return GitInstallUrlResponse(install_url=url)
 
     # In backend/app/github/service.py
@@ -114,31 +72,8 @@ class GitIntegrationService:
         if not project_id and cookie_project_id:
             project_id = cookie_project_id
 
-        # 3. Fetch all repositories authorized under this installation from GitHub
-        installation_token = await self._get_installation_access_token(installation_id)
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://api.github.com/installation/repositories",
-                headers={
-                    "Authorization": f"Bearer {installation_token}",
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": "Synapse-App",
-                },
-                timeout=10,
-            )
-            if resp.status_code != 200:
-                raise HTTPException(
-                    status_code=resp.status_code,
-                    detail=f"Could not retrieve repositories: {resp.text}"
-                )
-
-            repos_json = resp.json()
-            repositories = repos_json.get("repositories", [])
-            if not repositories:
-                raise HTTPException(
-                    status_code=400,
-                    detail="No repositories are configured under this App installation."
-                )
+        # 3. Fetch all repositories authorized under this installation
+        repositories = await self.git_provider.list_installation_repos(installation_id)
 
         # 4. Smart Repository Selection:
         # Find the best candidate among the authorized repositories.
@@ -146,7 +81,7 @@ class GitIntegrationService:
         selected_repo = None
         async with self.uow:
             for r in repositories:
-                name = r["full_name"]
+                name = r.repo_full_name
                 existing_link = await self.uow.git_integrations.get_by_repo_full_name(name)
                 
                 if not existing_link:
@@ -163,8 +98,8 @@ class GitIntegrationService:
                 # Fallback to the first available repository if all are already allocated
                 selected_repo = repositories[0]
 
-            repo_full_name = selected_repo["full_name"]
-            default_branch = selected_repo.get("default_branch", "main")
+            repo_full_name = selected_repo.repo_full_name
+            default_branch = selected_repo.default_branch
 
             # 5. Resolve project_id via repo fallback if it is still unknown
             if not project_id:
@@ -231,25 +166,14 @@ class GitIntegrationService:
 
     async def handle_webhook(
         self,
-        delivery_id: str,
-        event_type: str,
-        action: str,
-        payload: dict,
+        headers: dict,
         body_bytes: bytes,
-        signature: str | None,
+        payload: dict,
     ) -> None:
-        if not signature or not signature.startswith("sha256="):
-            raise HTTPException(status_code=401, detail="Invalid signature header.")
+        if not self.git_provider.verify_webhook_signature(headers, body_bytes):
+            raise HTTPException(status_code=401, detail="Invalid or mismatched webhook signature.")
 
-        received_hash = signature[7:]
-        expected_hash = hmac.new(
-            settings.github_webhook_secret.encode("utf-8"),
-            body_bytes,
-            hashlib.sha256
-        ).hexdigest()
-
-        if not hmac.compare_digest(received_hash, expected_hash):
-            raise HTTPException(status_code=401, detail="Webhook signature mismatch.")
+        delivery_id, event_type, action = self.git_provider.extract_delivery_metadata(headers, payload)
 
         async with self.uow:
             existing_event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
@@ -265,6 +189,8 @@ class GitIntegrationService:
             )
             await self.uow.commit()
 
+        return delivery_id
+
     async def process_webhook_event(self, delivery_id: str) -> None:
         async with self.uow:
             event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
@@ -274,14 +200,16 @@ class GitIntegrationService:
             await self.uow.commit()
 
         try:
-            if event.event_type == "issues" and event.action == "opened":
-                await self._handle_issue_opened(event.payload)
-            elif event.event_type == "issues" and event.action == "reopened":
-                await self._handle_issue_reopened(event.payload)
-            elif event.event_type == "push":
-                await self._handle_push(event.payload)
-            elif event.event_type == "pull_request" and event.action == "closed":
-                await self._handle_pull_request_closed(event.payload)
+            normalized = self.git_provider.parse_webhook_event(event.event_type, event.action, event.payload)
+            if normalized is not None:
+                if normalized.kind == "issue_opened":
+                    await self._handle_issue_opened(normalized)
+                elif normalized.kind == "issue_reopened":
+                    await self._handle_issue_reopened(normalized)
+                elif normalized.kind == "push":
+                    await self._handle_push(normalized)
+                elif normalized.kind == "change_request_closed":
+                    await self._handle_pull_request_closed(normalized)
 
             async with self.uow:
                 event = await self.uow.webhook_events.get_by_delivery_id(delivery_id)
@@ -304,9 +232,8 @@ class GitIntegrationService:
                     )
                 await self.uow.commit()
 
-    async def _handle_issue_opened(self, payload: dict) -> None:
-        repo_data = payload.get("repository", {})
-        repo_full_name = repo_data.get("full_name")
+    async def _handle_issue_opened(self, event: NormalizedGitEvent) -> None:
+        repo_full_name = event.repo_full_name
         if not repo_full_name:
             raise ValueError("No repository full name located in webhook payload.")
 
@@ -321,12 +248,11 @@ class GitIntegrationService:
             if not leads_channel:
                 raise ValueError(f"Leads channel not found for project: {project_id}")
 
-            issue_data = payload.get("issue", {})
-            title = issue_data.get("title", "")
-            description = issue_data.get("body", "")
-            issue_number = issue_data.get("number")
-            github_user_id = str(issue_data.get("user", {}).get("id"))
-            github_author_login = issue_data.get("user", {}).get("login")
+            title = event.title
+            description = event.description
+            issue_number = event.issue_number
+            github_user_id = event.author_external_id
+            github_author_login = event.author_login
 
             creator_id = None
             if github_user_id:
@@ -397,9 +323,8 @@ class GitIntegrationService:
                     },
                 )
 
-    async def _handle_issue_reopened(self, payload: dict) -> None:
-        repo_data = payload.get("repository", {})
-        repo_full_name = repo_data.get("full_name")
+    async def _handle_issue_reopened(self, event: NormalizedGitEvent) -> None:
+        repo_full_name = event.repo_full_name
         if not repo_full_name:
             raise ValueError("No repository full name located in webhook payload.")
 
@@ -410,10 +335,9 @@ class GitIntegrationService:
                 raise ValueError(f"Integration record not found for repository: {repo_full_name}")
 
             project_id = integration.project_id
-            issue_data = payload.get("issue", {})
-            issue_number = issue_data.get("number")
-            title = issue_data.get("title", "")
-            github_author_login = issue_data.get("user", {}).get("login")
+            issue_number = event.issue_number
+            title = event.title
+            github_author_login = event.author_login
 
             ticket = await self.uow.tickets.get_by_project_and_issue_number(project_id, issue_number)
             if not ticket:
@@ -480,9 +404,8 @@ class GitIntegrationService:
                     },
                 )
 
-    async def _handle_push(self, payload: dict) -> None:
-        repo_data = payload.get("repository", {})
-        repo_full_name = repo_data.get("full_name")
+    async def _handle_push(self, event: NormalizedGitEvent) -> None:
+        repo_full_name = event.repo_full_name
         if not repo_full_name:
             raise ValueError("No repository full name located in webhook payload.")
 
@@ -496,7 +419,7 @@ class GitIntegrationService:
             project_id = integration.project_id
             default_branch = integration.default_branch
 
-        ref = payload.get("ref", "")  # e.g., "refs/heads/main"
+        ref = event.ref or ""  # e.g., "refs/heads/main"
         expected_ref = f"refs/heads/{default_branch}"
 
         # Filter out feature/topic branch updates
@@ -552,15 +475,13 @@ class GitIntegrationService:
                 detail="You must be a member of this project to inspect integration details."
             )
     
-    async def _handle_pull_request_closed(self, payload: dict) -> None:
-        repo_data = payload.get("repository", {})
-        repo_full_name = repo_data.get("full_name")
+    async def _handle_pull_request_closed(self, event: NormalizedGitEvent) -> None:
+        repo_full_name = event.repo_full_name
         if not repo_full_name:
             raise ValueError("No repository full name located in webhook payload.")
     
-        pr_data = payload.get("pull_request", {})
-        pr_number = pr_data.get("number")
-        merged = pr_data.get("merged", False)
+        pr_number = event.change_request_number
+        merged = event.merged
     
         async with self.uow:
             integration = await self.uow.git_integrations.get_by_repo_full_name(repo_full_name)
