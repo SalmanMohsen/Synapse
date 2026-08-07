@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 from fastapi import HTTPException
 from app.github.service import GitIntegrationService
 from app.github.models import WebhookEventStatus
+from app.git_providers.base import NormalizedGitEvent
 
 class FakeWebhookEvent:
     def __init__(self, **kwargs):
@@ -52,33 +53,34 @@ class FakeGitWebhookUnitOfWork:
 
 
 @pytest.mark.asyncio
-@patch("app.github.service.settings")
-async def test_handle_webhook_invalid_signature(mock_settings):
-    mock_settings.github_webhook_secret = "secret-123"
+async def test_handle_webhook_invalid_signature():
     uow = FakeGitWebhookUnitOfWork()
-    service = GitIntegrationService(uow, redis=AsyncMock())
+    mock_provider = MagicMock()
+    mock_provider.verify_webhook_signature.return_value = False
+    
+    service = GitIntegrationService(uow, redis=AsyncMock(), git_provider=mock_provider)
 
+    headers = {"X-Hub-Signature-256": "sha256=invalid"}
     body = b'{"ref": "refs/heads/main"}'
-    signature = "sha256=invalidhash"
+    payload = {"ref": "refs/heads/main"}
 
     with pytest.raises(HTTPException) as exc_info:
         await service.handle_webhook(
-            delivery_id="delivery-1",
-            event_type="push",
-            action="pushed",
-            payload={"ref": "refs/heads/main"},
+            headers=headers,
             body_bytes=body,
-            signature=signature
+            payload=payload
         )
     assert exc_info.value.status_code == 401
 
 
 @pytest.mark.asyncio
-@patch("app.github.service.settings")
-async def test_handle_webhook_idempotency_duplicate(mock_settings):
-    mock_settings.github_webhook_secret = "secret-123"
+async def test_handle_webhook_idempotency_duplicate():
     uow = FakeGitWebhookUnitOfWork()
-    service = GitIntegrationService(uow, redis=AsyncMock())
+    mock_provider = MagicMock()
+    mock_provider.verify_webhook_signature.return_value = True
+    mock_provider.extract_delivery_metadata.return_value = ("dup-delivery", "push", "pushed")
+
+    service = GitIntegrationService(uow, redis=AsyncMock(), git_provider=mock_provider)
 
     # Seed an already processed event
     await uow.webhook_events.create(
@@ -89,19 +91,15 @@ async def test_handle_webhook_idempotency_duplicate(mock_settings):
         status=WebhookEventStatus.processed
     )
 
+    headers = {"X-Hub-Signature-256": "sha256=valid"}
     body = b'{"ref": "refs/heads/main"}'
-    expected_hash = hmac.new(b"secret-123", body, hashlib.sha256).hexdigest()
-    signature = f"sha256={expected_hash}"
+    payload = {"ref": "refs/heads/main"}
 
-    # Verify duplicate event exits early without raising exceptions or writing new rows
     initial_count = len(uow.webhook_events.events)
     await service.handle_webhook(
-        delivery_id="dup-delivery",
-        event_type="push",
-        action="pushed",
-        payload={"ref": "refs/heads/main"},
+        headers=headers,
         body_bytes=body,
-        signature=signature
+        payload=payload
     )
     assert len(uow.webhook_events.events) == initial_count
 
@@ -120,13 +118,15 @@ async def test_handle_push_event_matching_branch(mock_get_arq_pool):
 
     service = GitIntegrationService(uow, redis=AsyncMock())
 
-    payload = {
-        "ref": "refs/heads/main",
-        "repository": {"full_name": "org/repo"}
-    }
+    event = NormalizedGitEvent(
+        kind="push",
+        repo_full_name="org/repo",
+        ref="refs/heads/main"
+    )
 
-    await service._handle_push(payload)
-    mock_pool.enqueue_job.assert_called_once_with("ingest_repository", project_id="project-456")
+    await service._handle_push(event)
+    mock_pool.enqueue_job.assert_called_once_with("ingest_repository_job", project_id="project-456")
+
 
 
 @pytest.mark.asyncio
@@ -143,10 +143,11 @@ async def test_handle_push_event_ignored_branch(mock_get_arq_pool):
 
     service = GitIntegrationService(uow, redis=AsyncMock())
 
-    payload = {
-        "ref": "refs/heads/feature-branch",
-        "repository": {"full_name": "org/repo"}
-    }
+    event = NormalizedGitEvent(
+        kind="push",
+        repo_full_name="org/repo",
+        ref="refs/heads/feature-branch"
+    )
 
-    await service._handle_push(payload)
-    mock_pool.enqueue_job.assert_not_called()
+    await service._handle_push(event)
+    mock_pool.enqueue_job.asse

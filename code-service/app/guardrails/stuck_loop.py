@@ -62,11 +62,13 @@ class StuckLoopSubscriber:
                     self._inject_warning(warning_msg), ctx.main_loop
                 )
         except StuckLoopTriggered as triggered:
+            # Bind to a normal local variable that survives block exit
+            triggered_exc = triggered
 
             async def _abort() -> None:
-                await _abort_due_to_stuck_loop(ctx, str(triggered))
+                await _abort_due_to_stuck_loop(ctx, str(triggered_exc))
                 # Previously: teardown_sandbox(sandbox_handle) directly here.
                 # Now: signal only -- the orchestrator owns the teardown.
-                ctx.request_abort(triggered)
+                ctx.request_abort(triggered_exc)
 
             asyncio.run_coroutine_threadsafe(_abort(), ctx.main_loop)
