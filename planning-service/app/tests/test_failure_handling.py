@@ -23,7 +23,6 @@ async def test_generate_plan_job_retries_on_transient_db_setup_error(mock_get_co
     with pytest.raises(Retry) as exc_info:
         await generate_plan_job(ctx, ticket_id="ticket-123", agent_run_id="run-123")
     
-    # arq stores the normalized delay internally in milliseconds as defer_score
     assert exc_info.value.defer_score == 60000
 
 
@@ -50,23 +49,13 @@ async def test_generate_plan_job_escalates_on_terminal_technical_failure(mock_ge
 
 
 @pytest.mark.asyncio
-@patch("app.worker.create_agent_run_step")
-@patch("app.worker.complete_agent_run_step")
-@patch("app.worker.fail_agent_run_step")
-@patch("app.worker.embed_query")
 @patch("app.worker.get_connection")
-@patch("app.worker.retrieve_chunks")
-@patch("app.worker.generate_development_plan")
-@patch("app.worker.validate_development_plan_grounding")
+@patch("app.worker.run_planning_pipeline")
 async def test_generate_plan_job_file_grounding_validation_failure_rollbacks(
-    mock_validate, mock_gen_plan, mock_retrieve, mock_get_connection, mock_embed_query, mock_fail_step, mock_complete_step, mock_create_step
+    mock_pipeline, mock_get_connection
 ):
-    # Mock embed_query and the database step-logging helpers to bypass real external connections
-    mock_embed_query.return_value = [0.0] * 768
-    mock_create_step.return_value = "step-id-123"
-
-    # Mock grounding validation error
-    mock_validate.side_effect = FileGroundingValidationError(
+    # Mock planning pipeline raising grounding validation error
+    mock_pipeline.side_effect = FileGroundingValidationError(
         "Attempted to modify missing_file.py which does not exist in code index.",
         step_number=2,
         file_path="missing_file.py"
@@ -84,8 +73,6 @@ async def test_generate_plan_job_file_grounding_validation_failure_rollbacks(
         MagicMock(mappings=MagicMock(return_value=MagicMock(first=lambda: {"specialty_file_id": "sf-1", "technology_file_id": "tf-1"}))), # assignments
         MagicMock(first=lambda: ("Specialty text",)), # specialty content
         MagicMock(first=lambda: ("Tech text",)), # tech content
-        MagicMock(), # create validation step
-        MagicMock(), # fail validation step
         MagicMock(), # Revert Ticket to consensus_reached on fail block
         MagicMock(), # Revert AgentRun to failed on fail block
         MagicMock(), # insert fail system message card
