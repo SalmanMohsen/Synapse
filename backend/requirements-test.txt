@@ -1,0 +1,6 @@
+# Integration-test-only dependencies. Kept separate from requirements.txt so
+# the production image doesn't pull Docker-in-Docker machinery.
+# pytest / pytest-asyncio / pytest-cov already live in requirements.txt and
+# cover the existing unit suites — install both files for integration tests:
+#   pip install -r requirements.txt -r requirements-test.txt
+testcontainers[postgres,redis]==4.15.0

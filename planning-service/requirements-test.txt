@@ -1,0 +1,5 @@
+# Test-only dependencies, kept out of the production image.
+# Install alongside requirements.txt: pip install -r requirements.txt -r requirements-test.txt
+pytest==8.3.3
+pytest-asyncio==0.24.0
+testcontainers[postgres]==4.15.0
